@@ -1,0 +1,17 @@
+[Unit]
+Description=ScreenMirror LAN TV stream
+PartOf=graphical-session.target
+After=graphical-session.target
+# screenmirror-plugin-owned: fpaulcris.screenmirror
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @PLUGIN_DIR@/share/server.py
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=8
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

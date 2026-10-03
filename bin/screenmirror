@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# ScreenMirror — stream this desktop to a TV browser on the LAN.
+set -euo pipefail
+
+UNIT="screenmirror.service"
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  RUNTIME="${XDG_RUNTIME_DIR}/screenmirror"
+else
+  RUNTIME="${HOME}/.cache/screenmirror"
+fi
+PRIMARY_PORT="${MIRROR_PORTS:-8080}"
+PRIMARY_PORT="${PRIMARY_PORT%%,*}"
+SAME_WIFI="The TV or phone has to be on the same Wi-Fi as this computer."
+BROWSER_NOTE="This is a browser address, so it will not show up in the TV's screen-cast menu."
+
+usage() {
+  cat <<EOF
+ScreenMirror — mirror this screen to a smart TV browser over Wi-Fi.
+
+Usage:
+  screenmirror            Start and show the TV URL (press q to stop)
+  screenmirror start      Start in the background
+  screenmirror stop       Stop
+  screenmirror status     Running or not, plus the URL
+  screenmirror status --json
+                          One JSON object: state, url, detail
+  screenmirror url        Print the TV address
+  screenmirror copy       Copy the TV address to the clipboard
+  screenmirror help
+
+${SAME_WIFI}
+${BROWSER_NOTE}
+EOF
+}
+
+lan_ip() {
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
+}
+
+predicted_url() {
+  local ip
+  ip="$(lan_ip)"
+  echo "http://${ip:-127.0.0.1}:${PRIMARY_PORT}/"
+}
+
+is_active() {
+  systemctl --user is-active --quiet "$UNIT"
+}
+
+wait_for_url() {
+  local i
+  for i in $(seq 1 40); do
+    if [[ -s "$RUNTIME/url" ]]; then
+      return 0
+    fi
+    sleep 0.15
+  done
+  return 1
+}
+
+current_url() {
+  if [[ -s "$RUNTIME/url" ]]; then
+    tr -d '\n' <"$RUNTIME/url"
+    return 0
+  fi
+  predicted_url
+}
+
+copy_url() {
+  local url
+  url="$(current_url)"
+  if command -v wl-copy >/dev/null; then
+    printf '%s' "$url" | wl-copy
+  fi
+  printf '%s\n' "$url"
+}
+
+cmd_start() {
+  systemctl --user start "$UNIT"
+  if ! wait_for_url; then
+    echo "ScreenMirror started, but the URL file is not ready yet." >&2
+    echo "Check: systemctl --user status $UNIT" >&2
+    return 1
+  fi
+  local url
+  url="$(tr -d '\n' <"$RUNTIME/url")"
+  command -v wl-copy >/dev/null && printf '%s' "$url" | wl-copy || true
+  if command -v omarchy-notification-send >/dev/null; then
+    omarchy-notification-send --app-name ScreenMirror -g $'\uf03d' -t 12000 \
+      "ScreenMirror is live" "On the TV browser: $url"$'\n'"${SAME_WIFI} ${BROWSER_NOTE}"
+  fi
+  echo "$url"
+}
+
+cmd_stop() {
+  systemctl --user stop "$UNIT" 2>/dev/null || true
+  echo "ScreenMirror stopped."
+}
+
+cmd_status_json() {
+  MIRROR_RUNTIME="$RUNTIME" MIRROR_PREDICTED="$(predicted_url)" python3 - <<'PY'
+import json, os, shutil, subprocess
+
+runtime = os.environ.get("MIRROR_RUNTIME", "")
+predicted = os.environ.get("MIRROR_PREDICTED", "")
+status_path = os.path.join(runtime, "status.json")
+url_path = os.path.join(runtime, "url")
+
+def ok(args):
+    try:
+        return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        return False
+
+active = ok(["systemctl", "--user", "is-active", "--quiet", "screenmirror.service"])
+failed = ok(["systemctl", "--user", "is-failed", "--quiet", "screenmirror.service"])
+data = {}
+try:
+    with open(status_path, encoding="utf-8") as fh:
+        loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            data = loaded
+except Exception:
+    data = {}
+url = ""
+try:
+    with open(url_path, encoding="utf-8") as fh:
+        url = fh.read().strip()
+except Exception:
+    url = ""
+if not url:
+    url = str(data.get("primary") or predicted or "")
+if failed and not active:
+    state = "failed"
+elif active and data.get("ready") is True and data.get("listening") is True:
+    state = "live"
+elif active:
+    state = "starting"
+else:
+    state = "stopped"
+detail = ""
+if state == "failed":
+    if shutil.which("wf-recorder") is None:
+        detail = "wf-recorder is not installed."
+    else:
+        detail = "The stream stopped."
+print(json.dumps({"state": state, "url": url, "detail": detail}))
+PY
+}
+
+cmd_status() {
+  if [[ "${1:-}" == "--json" ]]; then
+    cmd_status_json
+    return 0
+  fi
+  if is_active; then
+    echo "running"
+    [[ -s "$RUNTIME/url" ]] && echo "url $(tr -d '\n' <"$RUNTIME/url")"
+    [[ -f "$RUNTIME/status.json" ]] && cat "$RUNTIME/status.json"
+    return 0
+  fi
+  echo "stopped"
+  return 1
+}
+
+cmd_url() {
+  current_url
+  echo
+}
+
+cmd_ui() {
+  if ! is_active; then
+    cmd_start >/dev/null
+  fi
+  wait_for_url || true
+  local url ip
+  url="$(current_url)"
+  ip="$(lan_ip)"
+
+  clear
+  echo
+  echo "  ScreenMirror"
+  echo "  ------------"
+  echo
+  echo "  On the TV:"
+  echo "    1. Open the internet browser"
+  echo "    2. Go to this address:"
+  echo
+  echo "       $url"
+  echo
+  echo "  ${SAME_WIFI}"
+  echo "  ${BROWSER_NOTE}"
+  echo
+  echo "  Fallback:  http://${ip}:${PRIMARY_PORT}/"
+  echo "             http://${ip}:8000/"
+  echo
+  if command -v qrencode >/dev/null; then
+    qrencode -t ansiutf8 "$url" || true
+    echo
+  fi
+  echo "  URL copied to the clipboard."
+  echo "  Press q to stop and quit.  Ctrl-C also stops."
+  echo
+
+  cleanup() {
+    cmd_stop >/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  while true; do
+    if ! is_active; then
+      echo "Stream ended."
+      break
+    fi
+    if read -rsn1 -t 1 key; then
+      case "$key" in
+        q|Q) break ;;
+      esac
+    fi
+  done
+}
+
+cmd="${1:-ui}"
+case "$cmd" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  status) cmd_status "${2:-}" ;;
+  url) cmd_url ;;
+  copy) copy_url ;;
+  ui) cmd_ui ;;
+  help|-h|--help) usage ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
