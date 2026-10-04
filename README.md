@@ -13,7 +13,7 @@ The TV or phone has to be on the same Wi-Fi as this computer.
 `omarchy plugin add` clones this repository and can enable the shell plugin. It does not install the streamer. Run `install.sh` after add, and again after an update if you want the desktop launcher and user service refreshed:
 
 ```bash
-omarchy plugin add https://github.com/fpaulcris/omarchy-screenmirror.git --enable
+omarchy plugin add https://github.com/fpaulcris/omarchy-screencast.git --enable
 bash ~/.config/omarchy/plugins/fpaulcris.screenmirror/install.sh
 ```
 
