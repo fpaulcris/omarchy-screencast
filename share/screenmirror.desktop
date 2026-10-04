@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=ScreenMirror
-GenericName=TV screen mirror
-Comment=Mirror this desktop to a TV browser on the same Wi-Fi. This is a browser address, so it will not show up in the TV's screen-cast menu.
-Exec=foot --app-id=screenmirror --title=ScreenMirror -e screenmirror ui
-Icon=screenmirror
+Name=Screen Cast
+GenericName=TV screen cast
+Comment=Cast this desktop to a TV browser on the same Wi-Fi. This is a browser address, so it will not show up in the TV's screen-cast menu.
+Exec=screencast start
+Icon=screencast
 Terminal=false
 Categories=AudioVideo;Utility;
 Keywords=tv;mirror;cast;screencast;wifi;browser;
@@ -15,8 +15,8 @@ Actions=start;stop;
 
 [Desktop Action start]
 Name=Start in background
-Exec=screenmirror start
+Exec=screencast start
 
 [Desktop Action stop]
-Name=Stop ScreenMirror
-Exec=screenmirror stop
+Name=Stop Screen Cast
+Exec=screencast stop

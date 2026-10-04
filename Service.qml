@@ -38,7 +38,7 @@ Item {
     if (trimmed === "") {
       streamState = "missing"
       url = ""
-      detail = "screenmirror is not installed. Run install.sh from the plugin directory."
+      detail = "screencast is not installed. Run install.sh from the plugin directory."
       return
     }
     var data = null
@@ -67,7 +67,7 @@ Item {
       queuedAction = name
       return
     }
-    action.command = ["screenmirror", name]
+    action.command = ["screencast", name]
     action.running = true
   }
 
@@ -77,7 +77,7 @@ Item {
 
   Process {
     id: probe
-    command: ["screenmirror", "status", "--json"]
+    command: ["screencast", "status", "--json"]
     stdout: StdioCollector {
       id: probeOut
       waitForEnd: true
@@ -94,7 +94,7 @@ Item {
 
   Process {
     id: action
-    command: ["screenmirror", "status", "--json"]
+    command: ["screencast", "status", "--json"]
     onExited: function(exitCode) {
       if (root.queuedAction !== "") {
         var next = root.queuedAction

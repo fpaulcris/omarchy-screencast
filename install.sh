@@ -12,7 +12,7 @@ while [[ -L "$SOURCE" ]]; do
 done
 PLUGIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-BIN_LINK="${HOME}/.local/bin/screenmirror"
+BIN_LINK="${HOME}/.local/bin/screencast"
 UNIT_PATH="${HOME}/.config/systemd/user/screenmirror.service"
 DESKTOP_PATH="${HOME}/.local/share/applications/screenmirror.desktop"
 ICON_DIR="${HOME}/.local/share/icons/hicolor"
@@ -39,9 +39,8 @@ owned_text() {
 write_receipt() {
   mkdir -p "$STATE_DIR"
   python3 - "$RECEIPT" "$BIN_LINK" "$UNIT_PATH" "$DESKTOP_PATH" \
-    "${ICON_DIR}/scalable/apps/screenmirror.svg" \
-    "${ICON_DIR}/48x48/apps/screenmirror.png" \
-    "${ICON_DIR}/256x256/apps/screenmirror.png" <<'PY'
+    "${ICON_DIR}/48x48/apps/screencast.png" \
+    "${ICON_DIR}/256x256/apps/screencast.png" <<'PY'
 import hashlib, json, os, sys
 receipt, link, *files = sys.argv[1:]
 recorded = {}
@@ -127,22 +126,25 @@ cmd_install() {
   if [[ -e "$UNIT_PATH" ]] && ! owned_text "$UNIT_PATH"; then
     die "$UNIT_PATH already exists and is not ScreenMirror"
   fi
-  if [[ -e "$DESKTOP_PATH" ]] && ! grep -q '^Name=ScreenMirror$' "$DESKTOP_PATH"; then
-    die "$DESKTOP_PATH already exists and is not ScreenMirror"
+  if [[ -e "$DESKTOP_PATH" ]] && ! grep -q "X-ScreenMirror-Plugin=${PLUGIN_ID}" "$DESKTOP_PATH"; then
+    die "$DESKTOP_PATH already exists and is not Screen Cast"
   fi
 
   mkdir -p "${HOME}/.local/bin" "${HOME}/.config/systemd/user" \
     "${HOME}/.local/share/applications" \
     "${ICON_DIR}/scalable/apps" "${ICON_DIR}/48x48/apps" "${ICON_DIR}/256x256/apps"
 
+  rm -f "${HOME}/.local/bin/screenmirror"
   ln -sfn "$PLUGIN_DIR/bin/screenmirror" "$BIN_LINK"
   chmod +x "$PLUGIN_DIR/bin/screenmirror"
 
   sed "s|@PLUGIN_DIR@|${PLUGIN_DIR}|g" "$PLUGIN_DIR/share/screenmirror.service" >"$UNIT_PATH"
   cp "$PLUGIN_DIR/share/screenmirror.desktop" "$DESKTOP_PATH"
-  cp "$PLUGIN_DIR/icons/screenmirror.svg" "${ICON_DIR}/scalable/apps/screenmirror.svg"
-  cp "$PLUGIN_DIR/icons/screenmirror-48.png" "${ICON_DIR}/48x48/apps/screenmirror.png"
-  cp "$PLUGIN_DIR/icons/screenmirror-256.png" "${ICON_DIR}/256x256/apps/screenmirror.png"
+  rm -f "${ICON_DIR}/scalable/apps/screenmirror.svg" \
+    "${ICON_DIR}/48x48/apps/screenmirror.png" \
+    "${ICON_DIR}/256x256/apps/screenmirror.png"
+  cp "$PLUGIN_DIR/icons/screenmirror-48.png" "${ICON_DIR}/48x48/apps/screencast.png"
+  cp "$PLUGIN_DIR/icons/screenmirror-256.png" "${ICON_DIR}/256x256/apps/screencast.png"
   write_receipt
 
   systemctl --user daemon-reload
@@ -157,7 +159,7 @@ cmd_install() {
     gtk-update-icon-cache -f -t "$ICON_DIR" >/dev/null 2>&1 || true
   fi
 
-  echo "ScreenMirror command: screenmirror"
+  echo "Screen Cast command: screencast"
   echo "The TV or phone has to be on the same Wi-Fi as this computer."
   echo "This is a browser address, so it will not show up in the TV's screen-cast menu."
   echo "If the TV browser stays blank, allow inbound TCP 8080, 8000, and 8090 from your private LAN. This installer does not change the firewall."

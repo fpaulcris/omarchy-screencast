@@ -52,7 +52,7 @@ BarWidget {
     if (trimmed === "") {
       localState = "missing"
       localUrl = ""
-      localDetail = "screenmirror is not installed. Run install.sh from the plugin directory."
+      localDetail = "screencast is not installed. Run install.sh from the plugin directory."
       return
     }
     var data = null
@@ -92,7 +92,7 @@ BarWidget {
       return
     }
     if (!localAction.running)
-      localAction.command = ["screenmirror", "start"]
+      localAction.command = ["screencast", "start"]
     if (!localAction.running)
       localAction.running = true
   }
@@ -103,7 +103,7 @@ BarWidget {
       return
     }
     if (!localAction.running)
-      localAction.command = ["screenmirror", "stop"]
+      localAction.command = ["screencast", "stop"]
     if (!localAction.running)
       localAction.running = true
   }
@@ -114,7 +114,7 @@ BarWidget {
       return
     }
     if (!localAction.running)
-      localAction.command = ["screenmirror", "copy"]
+      localAction.command = ["screencast", "copy"]
     if (!localAction.running)
       localAction.running = true
   }
@@ -204,7 +204,7 @@ BarWidget {
 
   Process {
     id: localProbe
-    command: ["screenmirror", "status", "--json"]
+    command: ["screencast", "status", "--json"]
     stdout: StdioCollector {
       id: localOut
       waitForEnd: true
@@ -221,7 +221,7 @@ BarWidget {
 
   Process {
     id: localAction
-    command: ["screenmirror", "status", "--json"]
+    command: ["screencast", "status", "--json"]
     onExited: function(exitCode) {
       root.refreshLocal()
     }
@@ -243,7 +243,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.glyph
-    tooltipText: "ScreenMirror (" + root.viewState + "). Left click opens the panel. Right click starts or stops. Middle click refreshes."
+    tooltipText: "Screen Cast (" + root.viewState + "). Left click opens the panel. Right click starts or stops. Middle click refreshes."
 
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton)
