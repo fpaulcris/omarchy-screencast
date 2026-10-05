@@ -191,13 +191,11 @@ Panel {
 
         Component {
           id: screenCastMark
-          Image {
+          CastIcon {
             width: Style.space(32)
             height: Style.space(32)
-            source: Qt.resolvedUrl("icons/screencast-bar.png")
-            fillMode: Image.PreserveAspectFit
-            smooth: true
-            mipmap: true
+            on: root.viewState === "live" || root.viewState === "starting"
+            tint: root.ink
           }
         }
 
@@ -432,7 +430,9 @@ Panel {
                       }
 
                       Text {
-                        visible: chosen
+                        // Highlight means the row is chosen. The word means
+                        // that device is the one this cast is using.
+                        visible: chosen && (root.viewState === "live" || root.viewState === "starting")
                         text: "Mirroring"
                         color: root.ink
                         font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -487,15 +487,30 @@ Panel {
           }
         }
 
-        Text {
+        RowLayout {
           width: parent.width
           visible: !root.showingInfo && root.mode === "browser" && root.viewUrl !== ""
-          text: root.viewUrl
-          wrapMode: Text.WrapAnywhere
-          color: root.ink
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.body
-          font.bold: true
+          spacing: Style.space(6)
+
+          Text {
+            text: "Watch at"
+            color: root.ink
+            opacity: 0.72
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            Layout.alignment: Qt.AlignBaseline
+          }
+
+          Text {
+            Layout.fillWidth: true
+            text: root.viewUrl
+            wrapMode: Text.WrapAnywhere
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            font.bold: true
+            Layout.alignment: Qt.AlignBaseline
+          }
         }
 
         Column {
@@ -711,7 +726,7 @@ Panel {
             stillThere = true
         }
         if (!stillThere)
-          root.receiverChoice = root.receivers.length ? root.receivers[0].id : ""
+          root.receiverChoice = ""
       }
       if (root.scanQueued) {
         root.scanQueued = false

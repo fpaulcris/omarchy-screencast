@@ -242,8 +242,18 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.glyph
+    text: ""
+    iconComponent: trayIcon
     tooltipText: "Screen Cast (" + root.viewState + "). Left click opens the panel. Right click starts or stops. Middle click refreshes."
+
+    Component {
+      id: trayIcon
+      CastIcon {
+        anchors.fill: parent
+        on: root.viewState === "live" || root.viewState === "starting"
+        tint: button.foreground
+      }
+    }
 
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.RightButton)
