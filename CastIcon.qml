@@ -6,7 +6,8 @@ import qs.Commons
 
 // Line and pixel drawings are white. MultiEffect colorization multiplies by
 // luminance, so a black drawing stays black. tint is the theme foreground.
-// The Tokyo drawings already carry the Tokyo Night colors.
+// The Tokyo drawings already carry the Tokyo Night colors. Line artwork uses
+// the same inset as those drawings, so the glyph matches the other tray icons.
 // The panel header and the tray both rasterize at Style.space(32). Scaling a
 // smaller bar texture up is what made the tray copy look soft.
 Item {
