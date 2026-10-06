@@ -8,10 +8,6 @@ BarWidget {
   id: root
   moduleName: "fpaulcris.screenmirror"
 
-  // Keep these two sentences identical to bin/screenmirror.
-  readonly property string sameWifi: "The TV or phone has to be on the same Wi-Fi as this computer."
-  readonly property string browserNote: "This is a browser address, so it will not show up in the TV's screen-cast menu."
-
   property var mirror: null
   property string localState: "stopped"
   property string localUrl: ""

@@ -18,9 +18,6 @@ Panel {
   readonly property string viewState: hostWidget ? hostWidget.viewState : "stopped"
   readonly property string viewUrl: hostWidget ? hostWidget.viewUrl : ""
   readonly property string viewDetail: hostWidget ? hostWidget.viewDetail : ""
-  readonly property string sameWifi: hostWidget ? hostWidget.sameWifi : ""
-  readonly property string browserNote: hostWidget ? hostWidget.browserNote : ""
-
   readonly property bool canStart: viewState === "stopped" || viewState === "failed"
   readonly property bool canStop: viewState === "live" || viewState === "starting"
   readonly property bool canCopy: viewUrl !== ""
@@ -249,7 +246,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "How to watch"
+              text: "Find Devices"
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.subtitle
@@ -257,7 +254,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Open the browser on the TV or phone and go to the address under Resolution. " + root.sameWifi + " " + root.browserNote
+              text: "Find AirPlay, Chromecast and Miracast devices on this Wi-Fi. Select a device to connect."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -265,7 +262,8 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Desktops"
+              topPadding: Style.space(14)
+              text: "Browser"
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.subtitle
@@ -273,7 +271,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Follow Screen sends this laptop's screen. A numbered desktop stays on this laptop while you are looking at it. When you switch away, that desktop moves to its own virtual screen and the picture keeps going."
+              text: "Open the address in a browser on your TV or phone, connected to the same Wi-Fi. This option is not listed in the TV's cast menu."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -281,31 +279,37 @@ Panel {
             }
             Text {
               width: parent.width
+              leftPadding: Style.space(12)
+              topPadding: Style.space(10)
+              text: "Desktop"
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              text: "Follow Screen shares your current desktop. Choose a desktop number to use as an extended display."
+              wrapMode: Text.WordWrap
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              topPadding: Style.space(10)
               text: "Resolution"
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
-            }
-            Text {
-              width: parent.width
-              text: "Auto uses this laptop's resolution. A chosen size is kept until you change it. 4K is the size of that desktop on its virtual screen. While you are looking at it here, the picture matches this laptop. Windows on that desktop keep the same share of the screen when the size changes."
-              wrapMode: Text.WordWrap
-              color: root.ink
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
-            }
-            Text {
-              width: parent.width
-              text: "Other TVs"
-              color: root.ink
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.subtitle
               font.bold: true
             }
             Text {
               width: parent.width
-              text: "Find Devices can see AirPlay, Chromecast, and Miracast names. This computer cannot send the picture to them yet, so the TV still uses the browser address. Miracast also needs Wi-Fi Direct, which this Wi-Fi card does not offer."
+              leftPadding: Style.space(12)
+              text: "Auto matches the resolution of the device casting the screen. A fixed resolution applies when the selected desktop is on its own screen."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -461,29 +465,55 @@ Panel {
           }
         }
 
-        Dropdown {
-          visible: !root.showingInfo && root.mode === "browser"
+        Column {
           width: parent.width
-          label: "Desktop"
-          value: root.workspaceChoice
-          options: root.desktopOptions
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          onChanged: function(value) {
-            root.workspaceChoice = value
-            root.saveCast(["cast", "--workspace", value])
+          visible: !root.showingInfo && root.mode === "browser"
+          spacing: Style.spacing.labelGap
+
+          // The shared Dropdown paints its label at caption size. These
+          // names sit with the field value and the buttons, so they use body.
+          Text {
+            text: "Desktop"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Dropdown {
+            width: parent.width
+            showLabel: false
+            value: root.workspaceChoice
+            options: root.desktopOptions
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            onChanged: function(value) {
+              root.workspaceChoice = value
+              root.saveCast(["cast", "--workspace", value])
+            }
           }
         }
 
-        Dropdown {
-          visible: !root.showingInfo && root.mode === "browser"
+        Column {
           width: parent.width
-          label: "Resolution"
-          value: root.sizeChoice
-          options: root.resolutionOptions
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          onChanged: function(value) {
-            root.sizeChoice = value
-            root.saveCast(["cast", "--size", value])
+          visible: !root.showingInfo && root.mode === "browser"
+          spacing: Style.spacing.labelGap
+
+          Text {
+            text: "Resolution"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Dropdown {
+            width: parent.width
+            showLabel: false
+            value: root.sizeChoice
+            options: root.resolutionOptions
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            onChanged: function(value) {
+              root.sizeChoice = value
+              root.saveCast(["cast", "--size", value])
+            }
           }
         }
 
@@ -495,9 +525,8 @@ Panel {
           Text {
             text: "Watch at"
             color: root.ink
-            opacity: 0.72
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.body
             Layout.alignment: Qt.AlignBaseline
           }
 

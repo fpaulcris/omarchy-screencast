@@ -4,7 +4,8 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 
-// Line and pixel drawings use currentColor, so they are tinted to the bar.
+// Line and pixel drawings are white. MultiEffect colorization multiplies by
+// luminance, so a black drawing stays black. tint is the theme foreground.
 // The Tokyo drawings already carry the Tokyo Night colors.
 // The panel header and the tray both rasterize at Style.space(32). Scaling a
 // smaller bar texture up is what made the tray copy look soft.
@@ -12,7 +13,7 @@ Item {
   id: icon
 
   property bool on: false
-  property color tint: "#e6e6e6"
+  property color tint: Color.bar.text
   property string themeName: ""
 
   readonly property string styleName: {
