@@ -10,6 +10,13 @@ else
 fi
 PRIMARY_PORT="${MIRROR_PORTS:-8080}"
 PRIMARY_PORT="${PRIMARY_PORT%%,*}"
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PLUGIN_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 SAME_WIFI="The TV or phone has to be on the same Wi-Fi as this computer."
 BROWSER_NOTE="This is a browser address, so it will not show up in the TV's screen-cast menu."
 
@@ -41,7 +48,10 @@ Usage:
                           1280x720, 1920x1080, 2560x1440, or 3840x2160
   screencast qr         Write a QR code for the address and print its path
   screencast receivers --json
-                          AirPlay, Chromecast, and Miracast devices on this Wi-Fi
+                          AirPlay, Chromecast, Miracast, Android TV, and Fire TV
+  screencast mirror <id>  Send the picture to a Chromecast from that list
+  screencast mirror stop
+  screencast mirror status
   screencast help
 
 ${SAME_WIFI}
@@ -109,7 +119,11 @@ cmd_start() {
 }
 
 cmd_stop() {
+  if [[ -f "$PLUGIN_DIR/share/mirror.py" ]]; then
+    python3 "$PLUGIN_DIR/share/mirror.py" stop >/dev/null 2>&1 || true
+  fi
   systemctl --user stop "$UNIT" 2>/dev/null || true
+  systemctl --user reset-failed "$UNIT" 2>/dev/null || true
   echo "Screen Cast stopped."
 }
 
@@ -194,7 +208,27 @@ elif follow:
 elif workspace:
     place = "a virtual screen" if virtual else "this screen"
     detail = f"Desktop {workspace} on {place}, {width}×{height}."
-print(json.dumps({"state": state, "url": url, "detail": detail, "workspace": str(workspace), "follow": follow, "size": f"{width}x{height}"}))
+mirror = {}
+try:
+    with open(os.path.join(runtime, "mirror.json"), encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    if isinstance(loaded, dict) and loaded.get("state") in ("starting", "live", "failed"):
+        mirror = {
+            "state": loaded.get("state") or "",
+            "id": loaded.get("id") or "",
+            "name": loaded.get("name") or "",
+            "detail": loaded.get("detail") or "",
+        }
+        if loaded.get("state") == "live" and loaded.get("name"):
+            detail = f"{detail} Mirroring to {loaded['name']}."
+        elif loaded.get("state") == "failed" and loaded.get("detail"):
+            detail = str(loaded["detail"])
+except Exception:
+    pass
+payload = {"state": state, "url": url, "detail": detail, "workspace": str(workspace), "follow": follow, "size": f"{width}x{height}"}
+if mirror:
+    payload["mirror"] = mirror
+print(json.dumps(payload))
 PY
 }
 
@@ -495,108 +529,11 @@ cmd_ui() {
 }
 
 cmd_receivers() {
-  python3 - <<'PY'
-import json, re, subprocess, sys
-
-wanted = {
-    "_airplay._tcp": "AirPlay",
-    "_googlecast._tcp": "Chromecast",
-    "_display._tcp": "Miracast",
+  python3 "$PLUGIN_DIR/share/discover.py"
 }
-audio_models = (
-    "nest mini",
-    "nest audio",
-    "google nest mini",
-    "chromecast audio",
-    "homepod",
-    "audioaccessory",
-    "google home",
-    "nest hub max",
-)
-# Nest Hub has a screen. "google home" above is the speaker; keep hubs as video.
-video_exceptions = ("nest hub", "google home hub")
 
-def unescape(text):
-    def repl(match):
-        return chr(int(match.group(1), 8))
-    return re.sub(r"\\([0-7]{3})", repl, text)
-
-def txt_map(raw):
-    found = {}
-    for part in re.findall(r'"([^"]*)"', raw):
-        if "=" in part:
-            key, value = part.split("=", 1)
-            found[key] = unescape(value)
-    return found
-
-def is_speaker(protocol, model):
-    folded = model.lower()
-    if protocol == "Miracast":
-        return False
-    if any(name in folded for name in video_exceptions) and "nest hub max" not in folded:
-        return False
-    if "nest hub max" in folded:
-        return False
-    if protocol == "AirPlay" and ("audioaccessory" in folded or "homepod" in folded):
-        return True
-    if protocol == "Chromecast":
-        if "group" in folded:
-            return True
-        if any(name in folded for name in audio_models):
-            if "hub" in folded:
-                return False
-            return True
-    return False
-
-try:
-    proc = subprocess.run(
-        ["avahi-browse", "-arpkt"],
-        text=True,
-        capture_output=True,
-        timeout=6,
-    )
-    text = proc.stdout or ""
-except FileNotFoundError:
-    json.dump({"receivers": [], "error": "Install avahi to look for receivers."}, sys.stdout)
-    sys.stdout.write("\n")
-    raise SystemExit(0)
-except subprocess.TimeoutExpired as exc:
-    text = exc.stdout or ""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", "replace")
-
-found = {}
-for line in text.splitlines():
-    if not line.startswith("="):
-        continue
-    parts = line.split(";")
-    if len(parts) < 9:
-        continue
-    protocol = wanted.get(parts[4])
-    if protocol is None or parts[2] != "IPv4":
-        continue
-    address = parts[7]
-    if ":" in address:
-        continue
-    fields = txt_map(";".join(parts[9:]))
-    model = fields.get("md") or fields.get("model") or fields.get("am") or ""
-    name = fields.get("fn") or fields.get("name") or unescape(parts[3])
-    speaker = is_speaker(protocol, model or name)
-    item = {
-        "id": protocol + ":" + address,
-        "name": name,
-        "protocol": protocol,
-        "address": address,
-        "model": model,
-        "video": not speaker,
-        "note": "This is a speaker, so it cannot show the screen." if speaker else "",
-    }
-    found[item["id"]] = item
-
-receivers = sorted(found.values(), key=lambda item: (not item["video"], item["name"].lower()))
-json.dump({"receivers": receivers}, sys.stdout)
-sys.stdout.write("\n")
-PY
+cmd_mirror() {
+  python3 "$PLUGIN_DIR/share/mirror.py" "$@"
 }
 
 cmd="${1:-open}"
@@ -612,6 +549,7 @@ case "$cmd" in
   cast) cmd_cast "${@:2}" ;;
   qr) cmd_qr ;;
   receivers) cmd_receivers ;;
+  mirror) cmd_mirror "${@:2}" ;;
   help|-h|--help) usage ;;
   *)
     echo "Unknown command: $cmd" >&2

@@ -2,6 +2,8 @@
 Description=ScreenMirror LAN TV stream
 PartOf=graphical-session.target
 After=graphical-session.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
 # screenmirror-plugin-owned: fpaulcris.screenmirror
 
 [Service]
@@ -10,7 +12,7 @@ ExecStart=/usr/bin/python3 @PLUGIN_DIR@/share/server.py
 Restart=on-failure
 RestartSec=2
 KillMode=control-group
-TimeoutStopSec=8
+TimeoutStopSec=3
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

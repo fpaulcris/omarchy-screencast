@@ -32,6 +32,10 @@ Panel {
   property string qrMessage: ""
   property var receivers: []
   property string receiverChoice: ""
+  property string mirrorState: "stopped"
+  property string mirrorId: ""
+  property string mirrorDetail: ""
+  property bool mirrorPollQueued: false
   property bool scanning: false
   property bool scanQueued: false
   property string scanError: ""
@@ -41,6 +45,7 @@ Panel {
   property bool qrOpenAtPress: false
 
   readonly property string refreshGlyph: String.fromCodePoint(0xF0450)
+  readonly property string infoGlyph: String.fromCodePoint(0xF02FD)
   readonly property string toggleOnGlyph: String.fromCodePoint(0xF0521)
   readonly property string toggleOffGlyph: String.fromCodePoint(0xF0522)
   readonly property var resolutionOptions: [
@@ -106,6 +111,66 @@ Panel {
   function chooseReceivers() {
     mode = "receivers"
     scanReceivers()
+    pollMirror()
+  }
+
+  function pollMirror() {
+    if (mirrorStatusProc.running) {
+      mirrorPollQueued = true
+      return
+    }
+    mirrorStatusProc.running = true
+  }
+
+  function runMirror(args) {
+    var stopping = args.length > 1 && args[1] === "stop"
+    var proc = stopping ? mirrorStopProc : mirrorProc
+    if (proc.running)
+      return
+    proc.command = ["screencast"].concat(args)
+    proc.running = true
+    if (stopping) {
+      mirrorState = "stopped"
+      mirrorDetail = ""
+    } else if (args.length > 1) {
+      mirrorId = args[1]
+      mirrorState = "starting"
+      mirrorDetail = "Connecting."
+    }
+  }
+
+  function extraProtocols(device) {
+    if (!device || !device.protocols)
+      return ""
+    var extra = []
+    for (var i = 0; i < device.protocols.length; i++) {
+      var item = device.protocols[i]
+      if (item && item.name && item.name !== device.protocol)
+        extra.push(item.name)
+    }
+    return extra.length === 0 ? "" : "Also " + extra.join(", ")
+  }
+
+  function deviceDetail(device) {
+    if (!device)
+      return ""
+    var lines = []
+    var proto = device.protocol || ""
+    var model = device.model || ""
+    var headline = ""
+    if (proto !== "" && model !== "")
+      headline = proto + " · " + model
+    else
+      headline = proto || model || (device.address || "")
+    if (headline !== "")
+      lines.push(headline)
+    var extra = extraProtocols(device)
+    if (extra !== "")
+      lines.push(extra)
+    var note = device.note || ""
+    if (note !== "")
+      lines.push(note)
+    return lines.join("\n")
   }
 
   function refreshAll() {
@@ -254,7 +319,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Find AirPlay, Chromecast and Miracast devices on this Wi-Fi. Select a device to connect."
+              text: "Chromecast devices can take the picture. Fire TV, Android TV Remote, AirPlay, and Miracast are listed when they answer, with the reason a picture cannot be sent."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -389,10 +454,24 @@ Panel {
               topPadding: Style.space(10)
               bottomPadding: Style.space(10)
               visible: !root.scanning && root.scanError === "" && root.receivers.length === 0
-              text: "No AirPlay, Chromecast, or Miracast devices answered."
+              text: "No receivers answered."
               wrapMode: Text.WordWrap
               color: root.ink
               opacity: 0.8
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              rightPadding: Style.space(12)
+              topPadding: Style.space(8)
+              bottomPadding: Style.space(10)
+              visible: root.mirrorState === "failed" && root.mirrorDetail !== ""
+              text: root.mirrorDetail
+              wrapMode: Text.WordWrap
+              color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -402,9 +481,33 @@ Panel {
               delegate: Rectangle {
                 required property var modelData
                 readonly property bool chosen: root.receiverChoice === modelData.id
+                property bool infoHot: false
                 width: deviceColumn.width
                 height: deviceRow.implicitHeight + Style.space(16)
                 color: chosen ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.12) : "transparent"
+
+                Text {
+                  id: infoMeasure
+                  visible: false
+                  textFormat: Text.PlainText
+                  text: root.deviceDetail(modelData)
+                  font.family: infoTip.fontFamily
+                  font.pixelSize: infoTip.fontSize
+                  wrapMode: Text.NoWrap
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    root.receiverChoice = modelData.id
+                    if (!modelData.canMirror)
+                      return
+                    if (root.mirrorId === modelData.id && (root.mirrorState === "live" || root.mirrorState === "starting"))
+                      root.runMirror(["mirror", "stop"])
+                    else
+                      root.runMirror(["mirror", modelData.id])
+                  }
+                }
 
                 RowLayout {
                   id: deviceRow
@@ -415,50 +518,60 @@ Panel {
                   anchors.rightMargin: Style.space(12)
                   spacing: Style.space(8)
 
-                  ColumnLayout {
+                  Text {
                     Layout.fillWidth: true
-                    spacing: Style.space(2)
+                    text: modelData.name
+                    color: root.ink
+                    elide: Text.ElideRight
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
 
-                    RowLayout {
-                      Layout.fillWidth: true
-                      spacing: Style.space(8)
+                  Text {
+                    visible: modelData.id === root.mirrorId && (root.mirrorState === "live" || root.mirrorState === "starting")
+                    text: root.mirrorState === "starting" ? "Connecting" : "Mirroring"
+                    color: root.ink
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
 
-                      Text {
-                        Layout.fillWidth: true
-                        text: modelData.name
-                        color: root.ink
-                        elide: Text.ElideRight
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.body
-                        font.bold: true
+                  PanelActionButton {
+                    id: deviceInfoButton
+                    visible: root.deviceDetail(modelData) !== ""
+                    iconText: root.infoGlyph
+                    foreground: root.ink
+                    fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                    Layout.alignment: Qt.AlignVCenter
+                    onHovered: function(isHovered) { infoHot = isHovered }
+
+                    PanelToolTip {
+                      id: infoTip
+                      visible: infoHot && text !== ""
+                      text: root.deviceDetail(modelData)
+                      fontFamily: deviceInfoButton.fontFamily
+                      readonly property real textLimit: Style.space(280)
+                      readonly property real padL: Border.left(panelBorderSpec) + Style.spacing.controlPaddingX
+                      readonly property real padR: Border.right(panelBorderSpec) + Style.spacing.controlPaddingX
+                      readonly property real bodyWidth: Math.min(infoMeasure.implicitWidth, textLimit)
+                      width: bodyWidth + padL + padR
+                      x: parent ? parent.width - width : 0
+
+                      contentItem: Text {
+                        textFormat: Text.PlainText
+                        text: infoTip.text
+                        color: infoTip.panelForeground
+                        font.family: infoTip.fontFamily
+                        font.pixelSize: infoTip.fontSize
+                        wrapMode: Text.WordWrap
+                        width: infoTip.width
+                        leftPadding: infoTip.padL
+                        rightPadding: infoTip.padR
+                        topPadding: Border.top(infoTip.panelBorderSpec) + Style.spacing.controlPaddingY
+                        bottomPadding: Border.bottom(infoTip.panelBorderSpec) + Style.spacing.controlPaddingY
                       }
-
-                      Text {
-                        // Highlight means the row is chosen. The word means
-                        // that device is the one this cast is using.
-                        visible: chosen && (root.viewState === "live" || root.viewState === "starting")
-                        text: "Mirroring"
-                        color: root.ink
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.body
-                      }
-                    }
-
-                    Text {
-                      Layout.fillWidth: true
-                      text: modelData.address
-                      color: root.ink
-                      opacity: 0.7
-                      wrapMode: Text.WrapAnywhere
-                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.subtitle
                     }
                   }
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: root.receiverChoice = modelData.id
                 }
               }
             }
@@ -726,6 +839,54 @@ Panel {
         root.qrSource = path === "" ? "" : "file://" + path
         qrPopup.open()
       })
+    }
+  }
+
+  Timer {
+    interval: 2000
+    running: root.opened && root.mode === "receivers"
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.pollMirror()
+  }
+
+  Process {
+    id: mirrorProc
+    command: ["screencast", "mirror", "status"]
+    onExited: root.pollMirror()
+  }
+
+  Process {
+    id: mirrorStopProc
+    command: ["screencast", "mirror", "stop"]
+    onExited: root.pollMirror()
+  }
+
+  Process {
+    id: mirrorStatusProc
+    command: ["screencast", "mirror", "status"]
+    stdout: StdioCollector {
+      id: mirrorStatusOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var data = null
+      try {
+        data = JSON.parse(String(mirrorStatusOut.text || ""))
+      } catch (e) {
+        data = null
+      }
+      if (data && data.state) {
+        root.mirrorState = String(data.state)
+        root.mirrorId = String(data.id || "")
+        root.mirrorDetail = String(data.detail || "")
+        if (root.mirrorId !== "")
+          root.receiverChoice = root.mirrorId
+      }
+      if (root.mirrorPollQueued) {
+        root.mirrorPollQueued = false
+        root.pollMirror()
+      }
     }
   }
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -31,6 +32,10 @@ def _runtime_dir() -> Path:
 
 RUNTIME = _runtime_dir()
 FIFO = RUNTIME / "live.mjpg"
+HLS_DIR = RUNTIME / "hls"
+HLS_TOKEN = RUNTIME / "hls.token"
+_HLS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}")
+_HLS_TOKEN = re.compile(r"[0-9a-f]{32}")
 ACCESS_LOG = RUNTIME / "access.log"
 URL_FILE = RUNTIME / "url"
 STATUS_FILE = RUNTIME / "status.json"
@@ -1214,46 +1219,40 @@ _vaapi_ok = False
 
 def vaapi_available(output: str) -> bool:
     global _vaapi_checked, _vaapi_ok
+    del output
     if _vaapi_checked:
         return _vaapi_ok
     _vaapi_checked = True
     if not os.path.exists(VAAPI_DEVICE):
         return False
-    probe = RUNTIME / "vaapi-probe.mjpg"
-    probe.unlink(missing_ok=True)
+    # wf-recorder aborts inside libx265 while this probe is exiting, which
+    # raises a crash dialog on every start. ffmpeg answers the same question.
     cmd = [
-        "wf-recorder",
-        "-o",
-        output,
-        "-d",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-vaapi_device",
         VAAPI_DEVICE,
-        "-c",
-        "mjpeg_vaapi",
-        "-r",
-        "5",
-        "-m",
-        "mjpeg",
         "-f",
-        str(probe),
-        "-D",
+        "lavfi",
+        "-i",
+        "nullsrc=size=64x64:rate=1",
+        "-vf",
+        "format=nv12,hwupload",
+        "-c:v",
+        "mjpeg_vaapi",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
     ]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+        _vaapi_ok = proc.returncode == 0
     except Exception:
         _vaapi_ok = False
-        probe.unlink(missing_ok=True)
-        return False
-    # The probe file stays empty until wf-recorder exits and flushes it.
-    time.sleep(0.45)
-    if proc.poll() is None:
-        proc.send_signal(signal.SIGINT)
-    try:
-        proc.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=0.6)
-    _vaapi_ok = probe.exists() and probe.stat().st_size > 1000
-    probe.unlink(missing_ok=True)
     if _vaapi_ok:
         print("screenmirror: encoding with the GPU", flush=True)
     else:
@@ -1406,6 +1405,27 @@ def reader_loop() -> None:
             fh.close()
 
 
+def read_hls_token() -> str:
+    try:
+        token = HLS_TOKEN.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not _HLS_TOKEN.fullmatch(token):
+        return ""
+    return token
+
+
+def hls_name(token: str, rest: str) -> str:
+    """File name under the session prefix, or empty when the prefix is wrong."""
+    prefix = f"{token}/"
+    if not token or not rest.startswith(prefix):
+        return ""
+    name = rest[len(prefix):]
+    if not _HLS_NAME.fullmatch(name):
+        return ""
+    return name
+
+
 def log_access(addr: str, line: str) -> None:
     stamp = time.strftime("%H:%M:%S")
     msg = f"{stamp} {addr} {line}\n"
@@ -1422,10 +1442,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         log_access(self.address_string(), fmt % args)
 
-    def _send(self, code: int, ctype: str, body: bytes) -> None:
+    def _send(self, code: int, ctype: str, body: bytes, *, cors: bool = False) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Connection", "close")
@@ -1462,6 +1484,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/stream.mjpg", "/live.mjpg"):
             self._stream()
             return
+        if path.startswith("/hls/"):
+            self._hls(path[5:])
+            return
         if path in ("/frame.jpg", "/frame.jpeg", "/desktop.jpg"):
             with _lock:
                 frame = _frame
@@ -1475,6 +1500,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200 if _frame_id else 503, "text/plain", body)
             return
         self._send(404, "text/plain", b"not found\n")
+
+    def _hls(self, rest: str) -> None:
+        name = hls_name(read_hls_token(), rest)
+        if not name:
+            self._send(404, "text/plain", b"not found\n")
+            return
+        file_path = HLS_DIR / name
+        if not file_path.is_file():
+            self._send(404, "text/plain", b"not found\n")
+            return
+        if name.endswith(".m3u8"):
+            ctype = "application/vnd.apple.mpegurl"
+        elif name.endswith(".ts"):
+            ctype = "video/mp2t"
+        else:
+            ctype = "application/octet-stream"
+        try:
+            body = file_path.read_bytes()
+        except OSError:
+            self._send(404, "text/plain", b"not found\n")
+            return
+        self._send(200, ctype, body, cors=True)
 
     def _stream(self) -> None:
         """Push the newest JPEG as soon as it is encoded. Skip any the TV has not caught up to."""
@@ -1547,15 +1594,14 @@ def stop_capture() -> None:
     if not proc:
         return
     if proc.poll() is None:
-        proc.send_signal(signal.SIGINT)
+        # SIGINT makes wf-recorder exit through libx265, which aborts and
+        # writes a core. Stop has to wait out that dump, so the service
+        # looks stuck. Kill it outright.
+        proc.kill()
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+            pass
     else:
         try:
             proc.wait(timeout=0.2)
@@ -1875,19 +1921,34 @@ def main() -> int:
     while time.time() < deadline and _frame_id == 0 and not _stop.is_set():
         time.sleep(0.1)
 
+    bound: list[int] = []
     for port in PORTS:
-        httpd = ThreadingHTTPServer((HOST, port), Handler)
+        try:
+            httpd = ThreadingHTTPServer((HOST, port), Handler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            print(f"screenmirror: port {port} is already open", flush=True)
+            continue
         httpd.daemon_threads = True
         _servers.append(httpd)
+        bound.append(port)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         print(f"Listening on http://{ip}:{port}/", flush=True)
 
+    if not bound:
+        print("screenmirror: the stream is already running.", flush=True)
+        _stop.set()
+        stop_capture()
+        return 0
+
     _listening = True
     write_status(ip, _status_output, True)
-    print(f"Primary URL: http://{ip}:{PORTS[0]}/", flush=True)
+    print(f"Primary URL: http://{ip}:{bound[0]}/", flush=True)
 
     def shutdown(*_args) -> None:
         _stop.set()
+        stop_capture()
         for httpd in _servers:
             httpd.shutdown()
 
