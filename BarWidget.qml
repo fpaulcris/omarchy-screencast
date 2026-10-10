@@ -12,6 +12,7 @@ BarWidget {
   property string localState: "stopped"
   property string localUrl: ""
   property string localDetail: ""
+  property bool localPreview: false
   property int localGeneration: 0
   property int localProbeGeneration: 0
   property int localConsumedGeneration: -1
@@ -21,6 +22,7 @@ BarWidget {
   readonly property string viewState: hosted ? mirror.streamState : localState
   readonly property string viewUrl: hosted ? mirror.url : localUrl
   readonly property string viewDetail: hosted ? mirror.detail : localDetail
+  readonly property bool previewOn: hosted ? mirror.previewOn === true : localPreview
 
   readonly property string glyph: {
     if (viewState === "live")
@@ -49,6 +51,7 @@ BarWidget {
       localState = "missing"
       localUrl = ""
       localDetail = "screencast is not installed. Run install.sh from the plugin directory."
+      localPreview = false
       return
     }
     var data = null
@@ -60,6 +63,7 @@ BarWidget {
     if (!data || typeof data.state !== "string") {
       localState = "failed"
       localDetail = trimmed.substring(0, 160)
+      localPreview = false
       return
     }
     var next = data.state
@@ -68,6 +72,7 @@ BarWidget {
     localState = next
     localUrl = String(data.url || "")
     localDetail = String(data.detail || "").substring(0, 160)
+    localPreview = data.preview === true
   }
 
   function refreshLocal() {
@@ -246,6 +251,9 @@ BarWidget {
       id: trayIcon
       CastIcon {
         anchors.fill: parent
+        // The mark is painted above the button's mouse area. Keep it out of
+        // hit testing so a left click reaches the button and opens the panel.
+        enabled: false
         on: root.viewState === "live" || root.viewState === "starting"
         tint: button.foreground
       }

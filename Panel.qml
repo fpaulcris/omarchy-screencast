@@ -18,6 +18,8 @@ Panel {
   readonly property string viewState: hostWidget ? hostWidget.viewState : "stopped"
   readonly property string viewUrl: hostWidget ? hostWidget.viewUrl : ""
   readonly property string viewDetail: hostWidget ? hostWidget.viewDetail : ""
+  readonly property bool previewFromHost: hostWidget ? hostWidget.previewOn === true : false
+  onPreviewFromHostChanged: applyHostPreview()
   readonly property bool canStart: viewState === "stopped" || viewState === "failed"
   readonly property bool canStop: viewState === "live" || viewState === "starting"
   readonly property bool canCopy: viewUrl !== ""
@@ -32,14 +34,17 @@ Panel {
   property string qrMessage: ""
   property var receivers: []
   property string receiverChoice: ""
-  property string mirrorState: "stopped"
-  property string mirrorId: ""
-  property string mirrorDetail: ""
+  property var mirrorSessions: []
+  property var mirrorQueue: []
   property bool mirrorPollQueued: false
   property bool scanning: false
   property bool scanQueued: false
   property string scanError: ""
   property bool showingInfo: false
+  property bool previewOn: false
+  property bool previewHold: false
+  property bool previewWant: false
+  property bool previewQueued: false
   property bool qrRequested: false
   property bool qrJustClosed: false
   property bool qrOpenAtPress: false
@@ -78,6 +83,25 @@ Panel {
       desktopProc.running = true
     if (!castReadProc.running)
       castReadProc.running = true
+  }
+
+  function applyHostPreview() {
+    if (previewHold && previewFromHost !== previewWant)
+      return
+    previewHold = false
+    previewOn = previewFromHost
+  }
+
+  function setPreview(want) {
+    previewWant = want
+    previewHold = true
+    previewOn = want
+    if (previewProc.running) {
+      previewQueued = true
+      return
+    }
+    previewProc.command = ["screencast", "preview", want ? "on" : "off"]
+    previewProc.running = true
   }
 
   function saveCast(args) {
@@ -122,20 +146,79 @@ Panel {
     mirrorStatusProc.running = true
   }
 
+  function sessionFor(id) {
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (item && item.id === id)
+        return item
+    }
+    return null
+  }
+
+  function sessionOn(id) {
+    var item = sessionFor(id)
+    return !!item && (item.state === "live" || item.state === "starting")
+  }
+
+  function setSession(id, state, detail) {
+    var next = []
+    var found = false
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (!item)
+        continue
+      if (item.id === id) {
+        found = true
+        if (state === "stopped")
+          continue
+        next.push({
+          id: id,
+          name: item.name || "",
+          state: state,
+          detail: detail || "",
+          url: item.url || ""
+        })
+      } else {
+        next.push(item)
+      }
+    }
+    if (!found && state !== "stopped") {
+      next.push({
+        id: id,
+        name: "",
+        state: state,
+        detail: detail || "",
+        url: ""
+      })
+    }
+    mirrorSessions = next
+  }
+
   function runMirror(args) {
-    var stopping = args.length > 1 && args[1] === "stop"
-    var proc = stopping ? mirrorStopProc : mirrorProc
-    if (proc.running)
+    var queued = mirrorQueue.slice()
+    queued.push(args)
+    mirrorQueue = queued
+    pumpMirror()
+  }
+
+  function pumpMirror() {
+    if (mirrorCmdProc.running || mirrorQueue.length === 0)
       return
-    proc.command = ["screencast"].concat(args)
-    proc.running = true
-    if (stopping) {
-      mirrorState = "stopped"
-      mirrorDetail = ""
-    } else if (args.length > 1) {
-      mirrorId = args[1]
-      mirrorState = "starting"
-      mirrorDetail = "Connecting."
+    var args = mirrorQueue[0]
+    mirrorQueue = mirrorQueue.slice(1)
+    mirrorCmdProc.command = ["screencast"].concat(args)
+    mirrorCmdProc.running = true
+  }
+
+  function toggleDevice(device) {
+    if (!device || device.canMirror !== true || !device.id)
+      return
+    if (sessionOn(device.id)) {
+      setSession(device.id, "stopped", "")
+      runMirror(["mirror", "stop", device.id])
+    } else {
+      setSession(device.id, "starting", "Connecting.")
+      runMirror(["mirror", device.id])
     }
   }
 
@@ -188,7 +271,10 @@ Panel {
     if (root.mode === "receivers")
       scanReceivers()
   }
-  Component.onCompleted: refreshChoices()
+  Component.onCompleted: {
+    applyHostPreview()
+    refreshChoices()
+  }
 
   readonly property string stateLabel: {
     if (viewState === "missing")
@@ -319,7 +405,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Chromecast devices can take the picture. Fire TV, Android TV Remote, AirPlay, and Miracast are listed when they answer, with the reason a picture cannot be sent."
+              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends this screen, and several can be on at once. The switch at the top stops the stream and every screen. A Fire TV switch sends this desktop to that TV's player. If the player refuses, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -375,6 +461,25 @@ Panel {
               width: parent.width
               leftPadding: Style.space(12)
               text: "Auto matches the resolution of the device casting the screen. A fixed resolution applies when the selected desktop is on its own screen."
+              wrapMode: Text.WordWrap
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              topPadding: Style.space(10)
+              text: "Frame rate and delay"
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              text: "The switch shows frames per second on the picture, and how many milliseconds of picture are still waiting. The same control sits in the corner of the picture."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -462,29 +567,18 @@ Panel {
               font.pixelSize: Style.font.body
             }
 
-            Text {
-              width: parent.width
-              leftPadding: Style.space(12)
-              rightPadding: Style.space(12)
-              topPadding: Style.space(8)
-              bottomPadding: Style.space(10)
-              visible: root.mirrorState === "failed" && root.mirrorDetail !== ""
-              text: root.mirrorDetail
-              wrapMode: Text.WordWrap
-              color: root.ink
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.body
-            }
-
             Repeater {
               model: root.receivers
               delegate: Rectangle {
                 required property var modelData
+                readonly property var session: root.sessionFor(modelData.id)
+                readonly property bool casting: session && (session.state === "live" || session.state === "starting")
+                readonly property bool failed: session && session.state === "failed" && String(session.detail || "") !== ""
                 readonly property bool chosen: root.receiverChoice === modelData.id
                 property bool infoHot: false
                 width: deviceColumn.width
-                height: deviceRow.implicitHeight + Style.space(16)
-                color: chosen ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.12) : "transparent"
+                height: deviceBody.implicitHeight + Style.space(16)
+                color: casting || chosen ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.12) : "transparent"
 
                 Text {
                   id: infoMeasure
@@ -498,24 +592,21 @@ Panel {
 
                 MouseArea {
                   anchors.fill: parent
-                  onClicked: {
-                    root.receiverChoice = modelData.id
-                    if (!modelData.canMirror)
-                      return
-                    if (root.mirrorId === modelData.id && (root.mirrorState === "live" || root.mirrorState === "starting"))
-                      root.runMirror(["mirror", "stop"])
-                    else
-                      root.runMirror(["mirror", modelData.id])
-                  }
+                  onClicked: root.receiverChoice = modelData.id
                 }
 
-                RowLayout {
-                  id: deviceRow
+                Column {
+                  id: deviceBody
                   anchors.left: parent.left
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   anchors.leftMargin: Style.space(12)
                   anchors.rightMargin: Style.space(12)
+                  spacing: Style.space(4)
+
+                RowLayout {
+                  id: deviceRow
+                  width: parent.width
                   spacing: Style.space(8)
 
                   Text {
@@ -529,11 +620,20 @@ Panel {
                   }
 
                   Text {
-                    visible: modelData.id === root.mirrorId && (root.mirrorState === "live" || root.mirrorState === "starting")
-                    text: root.mirrorState === "starting" ? "Connecting" : "Mirroring"
+                    visible: casting
+                    text: session && session.state === "starting" ? "Connecting" : "Mirroring"
                     color: root.ink
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.body
+                  }
+
+                  ToggleSwitch {
+                    visible: modelData.canMirror === true
+                    checked: casting
+                    interactive: modelData.canMirror === true
+                    foreground: root.ink
+                    Layout.alignment: Qt.AlignVCenter
+                    onToggled: root.toggleDevice(modelData)
                   }
 
                   PanelActionButton {
@@ -571,6 +671,17 @@ Panel {
                         bottomPadding: Border.bottom(infoTip.panelBorderSpec) + Style.spacing.controlPaddingY
                       }
                     }
+                  }
+                }
+
+                  Text {
+                    width: parent.width
+                    visible: failed
+                    text: session ? String(session.detail || "") : ""
+                    wrapMode: Text.WordWrap
+                    color: root.ink
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
                   }
                 }
               }
@@ -627,6 +738,28 @@ Panel {
               root.sizeChoice = value
               root.saveCast(["cast", "--size", value])
             }
+          }
+        }
+
+        RowLayout {
+          width: parent.width
+          visible: !root.showingInfo && root.mode === "browser"
+          spacing: Style.space(8)
+
+          Text {
+            Layout.fillWidth: true
+            text: "Frame rate and delay"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            Layout.alignment: Qt.AlignVCenter
+          }
+
+          ToggleSwitch {
+            checked: root.previewOn
+            foreground: root.ink
+            Layout.alignment: Qt.AlignVCenter
+            onToggled: root.setPreview(!root.previewOn)
           }
         }
 
@@ -799,6 +932,25 @@ Panel {
   }
 
   Process {
+    id: previewProc
+    command: ["screencast", "preview", "off"]
+    onExited: function(exitCode) {
+      if (root.previewQueued) {
+        root.previewQueued = false
+        previewProc.command = ["screencast", "preview", root.previewWant ? "on" : "off"]
+        previewProc.running = true
+        return
+      }
+      if (exitCode !== 0) {
+        root.previewHold = false
+        root.previewOn = root.previewFromHost
+      }
+      if (root.hostWidget && root.hostWidget.doRefresh)
+        root.hostWidget.doRefresh()
+    }
+  }
+
+  Process {
     id: castWriteProc
     command: ["screencast", "cast", "--json"]
     onExited: function(exitCode) {
@@ -851,15 +1003,15 @@ Panel {
   }
 
   Process {
-    id: mirrorProc
+    id: mirrorCmdProc
     command: ["screencast", "mirror", "status"]
-    onExited: root.pollMirror()
-  }
-
-  Process {
-    id: mirrorStopProc
-    command: ["screencast", "mirror", "stop"]
-    onExited: root.pollMirror()
+    onExited: function(exitCode) {
+      if (root.mirrorQueue.length > 0) {
+        root.pumpMirror()
+        return
+      }
+      root.pollMirror()
+    }
   }
 
   Process {
@@ -870,22 +1022,37 @@ Panel {
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      var data = null
-      try {
-        data = JSON.parse(String(mirrorStatusOut.text || ""))
-      } catch (e) {
-        data = null
-      }
-      if (data && data.state) {
-        root.mirrorState = String(data.state)
-        root.mirrorId = String(data.id || "")
-        root.mirrorDetail = String(data.detail || "")
-        if (root.mirrorId !== "")
-          root.receiverChoice = root.mirrorId
+      var busy = root.mirrorCmdProc.running || root.mirrorQueue.length > 0
+      if (!busy) {
+        var data = null
+        try {
+          data = JSON.parse(String(mirrorStatusOut.text || ""))
+        } catch (e) {
+          data = null
+        }
+        var next = []
+        var list = data && data.sessions ? data.sessions : []
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i]
+          if (!item || !item.id)
+            continue
+          var state = String(item.state || "stopped")
+          if (state === "stopped")
+            continue
+          next.push({
+            id: String(item.id),
+            name: String(item.name || ""),
+            state: state,
+            detail: String(item.detail || ""),
+            url: String(item.url || "")
+          })
+        }
+        root.mirrorSessions = next
       }
       if (root.mirrorPollQueued) {
         root.mirrorPollQueued = false
-        root.pollMirror()
+        if (!root.mirrorCmdProc.running)
+          root.pollMirror()
       }
     }
   }

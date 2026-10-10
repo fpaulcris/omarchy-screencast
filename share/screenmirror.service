@@ -8,12 +8,11 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 @PLUGIN_DIR@/share/server.py
+ExecStart=@PLUGIN_DIR@/zig/zig-out/bin/screencast serve
 Restart=on-failure
 RestartSec=2
 KillMode=control-group
 TimeoutStopSec=3
-Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=graphical-session.target

@@ -14,6 +14,7 @@ Item {
   property string streamState: "stopped"
   property string url: ""
   property string detail: ""
+  property bool previewOn: false
   property int generation: 0
   property int probeGeneration: 0
   property int consumedGeneration: -1
@@ -39,6 +40,7 @@ Item {
       streamState = "missing"
       url = ""
       detail = "screencast is not installed. Run install.sh from the plugin directory."
+      previewOn = false
       return
     }
     var data = null
@@ -50,6 +52,7 @@ Item {
     if (!data || typeof data.state !== "string") {
       streamState = "failed"
       detail = trimmed.substring(0, 160)
+      previewOn = false
       return
     }
     var next = data.state
@@ -58,6 +61,7 @@ Item {
     streamState = next
     url = String(data.url || "")
     detail = String(data.detail || "").substring(0, 160)
+    previewOn = data.preview === true
   }
 
   function runAction(name) {
@@ -127,7 +131,8 @@ Item {
       return JSON.stringify({
         state: root.streamState,
         url: root.url,
-        detail: root.detail
+        detail: root.detail,
+        preview: root.previewOn
       })
     }
 
