@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "fpaulcris",
   "license": "MIT",
-  "description": "Mirror this desktop to a TV or phone browser on the same Wi-Fi. A browser address, not Miracast.",
+  "description": "Mirror this desktop to a Chromecast, or to a browser on the same Wi-Fi.",
   "kinds": [
     "service",
     "bar-widget"

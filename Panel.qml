@@ -18,6 +18,8 @@ Panel {
   readonly property string viewState: hostWidget ? hostWidget.viewState : "stopped"
   readonly property string viewUrl: hostWidget ? hostWidget.viewUrl : ""
   readonly property string viewDetail: hostWidget ? hostWidget.viewDetail : ""
+  readonly property bool previewFromHost: hostWidget ? hostWidget.previewOn === true : false
+  onPreviewFromHostChanged: applyHostPreview()
   readonly property bool canStart: viewState === "stopped" || viewState === "failed"
   readonly property bool canStop: viewState === "live" || viewState === "starting"
   readonly property bool canCopy: viewUrl !== ""
@@ -32,15 +34,23 @@ Panel {
   property string qrMessage: ""
   property var receivers: []
   property string receiverChoice: ""
+  property var mirrorSessions: []
+  property var mirrorQueue: []
+  property bool mirrorPollQueued: false
   property bool scanning: false
   property bool scanQueued: false
   property string scanError: ""
   property bool showingInfo: false
+  property bool previewOn: false
+  property bool previewHold: false
+  property bool previewWant: false
+  property bool previewQueued: false
   property bool qrRequested: false
   property bool qrJustClosed: false
   property bool qrOpenAtPress: false
 
   readonly property string refreshGlyph: String.fromCodePoint(0xF0450)
+  readonly property string infoGlyph: String.fromCodePoint(0xF02FD)
   readonly property string toggleOnGlyph: String.fromCodePoint(0xF0521)
   readonly property string toggleOffGlyph: String.fromCodePoint(0xF0522)
   readonly property var resolutionOptions: [
@@ -75,6 +85,25 @@ Panel {
       castReadProc.running = true
   }
 
+  function applyHostPreview() {
+    if (previewHold && previewFromHost !== previewWant)
+      return
+    previewHold = false
+    previewOn = previewFromHost
+  }
+
+  function setPreview(want) {
+    previewWant = want
+    previewHold = true
+    previewOn = want
+    if (previewProc.running) {
+      previewQueued = true
+      return
+    }
+    previewProc.command = ["screencast", "preview", want ? "on" : "off"]
+    previewProc.running = true
+  }
+
   function saveCast(args) {
     if (castWriteProc.running) {
       queuedCast = args
@@ -106,6 +135,125 @@ Panel {
   function chooseReceivers() {
     mode = "receivers"
     scanReceivers()
+    pollMirror()
+  }
+
+  function pollMirror() {
+    if (mirrorStatusProc.running) {
+      mirrorPollQueued = true
+      return
+    }
+    mirrorStatusProc.running = true
+  }
+
+  function sessionFor(id) {
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (item && item.id === id)
+        return item
+    }
+    return null
+  }
+
+  function sessionOn(id) {
+    var item = sessionFor(id)
+    return !!item && (item.state === "live" || item.state === "starting")
+  }
+
+  function setSession(id, state, detail) {
+    var next = []
+    var found = false
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (!item)
+        continue
+      if (item.id === id) {
+        found = true
+        if (state === "stopped")
+          continue
+        next.push({
+          id: id,
+          name: item.name || "",
+          state: state,
+          detail: detail || "",
+          url: item.url || ""
+        })
+      } else {
+        next.push(item)
+      }
+    }
+    if (!found && state !== "stopped") {
+      next.push({
+        id: id,
+        name: "",
+        state: state,
+        detail: detail || "",
+        url: ""
+      })
+    }
+    mirrorSessions = next
+  }
+
+  function runMirror(args) {
+    var queued = mirrorQueue.slice()
+    queued.push(args)
+    mirrorQueue = queued
+    pumpMirror()
+  }
+
+  function pumpMirror() {
+    if (mirrorCmdProc.running || mirrorQueue.length === 0)
+      return
+    var args = mirrorQueue[0]
+    mirrorQueue = mirrorQueue.slice(1)
+    mirrorCmdProc.command = ["screencast"].concat(args)
+    mirrorCmdProc.running = true
+  }
+
+  function toggleDevice(device) {
+    if (!device || device.canMirror !== true || !device.id)
+      return
+    if (sessionOn(device.id)) {
+      setSession(device.id, "stopped", "")
+      runMirror(["mirror", "stop", device.id])
+    } else {
+      setSession(device.id, "starting", "Connecting.")
+      runMirror(["mirror", device.id])
+    }
+  }
+
+  function extraProtocols(device) {
+    if (!device || !device.protocols)
+      return ""
+    var extra = []
+    for (var i = 0; i < device.protocols.length; i++) {
+      var item = device.protocols[i]
+      if (item && item.name && item.name !== device.protocol)
+        extra.push(item.name)
+    }
+    return extra.length === 0 ? "" : "Also " + extra.join(", ")
+  }
+
+  function deviceDetail(device) {
+    if (!device)
+      return ""
+    var lines = []
+    var proto = device.protocol || ""
+    var model = device.model || ""
+    var headline = ""
+    if (proto !== "" && model !== "")
+      headline = proto + " · " + model
+    else
+      headline = proto || model || (device.address || "")
+    if (headline !== "")
+      lines.push(headline)
+    var extra = extraProtocols(device)
+    if (extra !== "")
+      lines.push(extra)
+    var note = device.note || ""
+    if (note !== "")
+      lines.push(note)
+    return lines.join("\n")
   }
 
   function refreshAll() {
@@ -123,7 +271,10 @@ Panel {
     if (root.mode === "receivers")
       scanReceivers()
   }
-  Component.onCompleted: refreshChoices()
+  Component.onCompleted: {
+    applyHostPreview()
+    refreshChoices()
+  }
 
   readonly property string stateLabel: {
     if (viewState === "missing")
@@ -254,7 +405,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Find AirPlay, Chromecast and Miracast devices on this Wi-Fi. Select a device to connect."
+              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends this screen, and several can be on at once. The switch at the top stops the stream and every screen. A Fire TV switch sends this desktop to that TV's player. If the player refuses, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -310,6 +461,25 @@ Panel {
               width: parent.width
               leftPadding: Style.space(12)
               text: "Auto matches the resolution of the device casting the screen. A fixed resolution applies when the selected desktop is on its own screen."
+              wrapMode: Text.WordWrap
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              topPadding: Style.space(10)
+              text: "Frame rate and delay"
+              color: root.ink
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              leftPadding: Style.space(12)
+              text: "The switch shows frames per second on the picture, and how many milliseconds of picture are still waiting. The same control sits in the corner of the picture."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -389,7 +559,7 @@ Panel {
               topPadding: Style.space(10)
               bottomPadding: Style.space(10)
               visible: !root.scanning && root.scanError === "" && root.receivers.length === 0
-              text: "No AirPlay, Chromecast, or Miracast devices answered."
+              text: "No receivers answered."
               wrapMode: Text.WordWrap
               color: root.ink
               opacity: 0.8
@@ -401,64 +571,118 @@ Panel {
               model: root.receivers
               delegate: Rectangle {
                 required property var modelData
+                readonly property var session: root.sessionFor(modelData.id)
+                readonly property bool casting: session && (session.state === "live" || session.state === "starting")
+                readonly property bool failed: session && session.state === "failed" && String(session.detail || "") !== ""
                 readonly property bool chosen: root.receiverChoice === modelData.id
+                property bool infoHot: false
                 width: deviceColumn.width
-                height: deviceRow.implicitHeight + Style.space(16)
-                color: chosen ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.12) : "transparent"
+                height: deviceBody.implicitHeight + Style.space(16)
+                color: casting || chosen ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.12) : "transparent"
 
-                RowLayout {
-                  id: deviceRow
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(12)
-                  anchors.rightMargin: Style.space(12)
-                  spacing: Style.space(8)
-
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(2)
-
-                    RowLayout {
-                      Layout.fillWidth: true
-                      spacing: Style.space(8)
-
-                      Text {
-                        Layout.fillWidth: true
-                        text: modelData.name
-                        color: root.ink
-                        elide: Text.ElideRight
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.body
-                        font.bold: true
-                      }
-
-                      Text {
-                        // Highlight means the row is chosen. The word means
-                        // that device is the one this cast is using.
-                        visible: chosen && (root.viewState === "live" || root.viewState === "starting")
-                        text: "Mirroring"
-                        color: root.ink
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.body
-                      }
-                    }
-
-                    Text {
-                      Layout.fillWidth: true
-                      text: modelData.address
-                      color: root.ink
-                      opacity: 0.7
-                      wrapMode: Text.WrapAnywhere
-                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.subtitle
-                    }
-                  }
+                Text {
+                  id: infoMeasure
+                  visible: false
+                  textFormat: Text.PlainText
+                  text: root.deviceDetail(modelData)
+                  font.family: infoTip.fontFamily
+                  font.pixelSize: infoTip.fontSize
+                  wrapMode: Text.NoWrap
                 }
 
                 MouseArea {
                   anchors.fill: parent
                   onClicked: root.receiverChoice = modelData.id
+                }
+
+                Column {
+                  id: deviceBody
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(12)
+                  anchors.rightMargin: Style.space(12)
+                  spacing: Style.space(4)
+
+                RowLayout {
+                  id: deviceRow
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: modelData.name
+                    color: root.ink
+                    elide: Text.ElideRight
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+
+                  Text {
+                    visible: casting
+                    text: session && session.state === "starting" ? "Connecting" : "Mirroring"
+                    color: root.ink
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+
+                  ToggleSwitch {
+                    visible: modelData.canMirror === true
+                    checked: casting
+                    interactive: modelData.canMirror === true
+                    foreground: root.ink
+                    Layout.alignment: Qt.AlignVCenter
+                    onToggled: root.toggleDevice(modelData)
+                  }
+
+                  PanelActionButton {
+                    id: deviceInfoButton
+                    visible: root.deviceDetail(modelData) !== ""
+                    iconText: root.infoGlyph
+                    foreground: root.ink
+                    fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                    Layout.alignment: Qt.AlignVCenter
+                    onHovered: function(isHovered) { infoHot = isHovered }
+
+                    PanelToolTip {
+                      id: infoTip
+                      visible: infoHot && text !== ""
+                      text: root.deviceDetail(modelData)
+                      fontFamily: deviceInfoButton.fontFamily
+                      readonly property real textLimit: Style.space(280)
+                      readonly property real padL: Border.left(panelBorderSpec) + Style.spacing.controlPaddingX
+                      readonly property real padR: Border.right(panelBorderSpec) + Style.spacing.controlPaddingX
+                      readonly property real bodyWidth: Math.min(infoMeasure.implicitWidth, textLimit)
+                      width: bodyWidth + padL + padR
+                      x: parent ? parent.width - width : 0
+
+                      contentItem: Text {
+                        textFormat: Text.PlainText
+                        text: infoTip.text
+                        color: infoTip.panelForeground
+                        font.family: infoTip.fontFamily
+                        font.pixelSize: infoTip.fontSize
+                        wrapMode: Text.WordWrap
+                        width: infoTip.width
+                        leftPadding: infoTip.padL
+                        rightPadding: infoTip.padR
+                        topPadding: Border.top(infoTip.panelBorderSpec) + Style.spacing.controlPaddingY
+                        bottomPadding: Border.bottom(infoTip.panelBorderSpec) + Style.spacing.controlPaddingY
+                      }
+                    }
+                  }
+                }
+
+                  Text {
+                    width: parent.width
+                    visible: failed
+                    text: session ? String(session.detail || "") : ""
+                    wrapMode: Text.WordWrap
+                    color: root.ink
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
                 }
               }
             }
@@ -514,6 +738,28 @@ Panel {
               root.sizeChoice = value
               root.saveCast(["cast", "--size", value])
             }
+          }
+        }
+
+        RowLayout {
+          width: parent.width
+          visible: !root.showingInfo && root.mode === "browser"
+          spacing: Style.space(8)
+
+          Text {
+            Layout.fillWidth: true
+            text: "Frame rate and delay"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            Layout.alignment: Qt.AlignVCenter
+          }
+
+          ToggleSwitch {
+            checked: root.previewOn
+            foreground: root.ink
+            Layout.alignment: Qt.AlignVCenter
+            onToggled: root.setPreview(!root.previewOn)
           }
         }
 
@@ -686,6 +932,25 @@ Panel {
   }
 
   Process {
+    id: previewProc
+    command: ["screencast", "preview", "off"]
+    onExited: function(exitCode) {
+      if (root.previewQueued) {
+        root.previewQueued = false
+        previewProc.command = ["screencast", "preview", root.previewWant ? "on" : "off"]
+        previewProc.running = true
+        return
+      }
+      if (exitCode !== 0) {
+        root.previewHold = false
+        root.previewOn = root.previewFromHost
+      }
+      if (root.hostWidget && root.hostWidget.doRefresh)
+        root.hostWidget.doRefresh()
+    }
+  }
+
+  Process {
     id: castWriteProc
     command: ["screencast", "cast", "--json"]
     onExited: function(exitCode) {
@@ -726,6 +991,69 @@ Panel {
         root.qrSource = path === "" ? "" : "file://" + path
         qrPopup.open()
       })
+    }
+  }
+
+  Timer {
+    interval: 2000
+    running: root.opened && root.mode === "receivers"
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.pollMirror()
+  }
+
+  Process {
+    id: mirrorCmdProc
+    command: ["screencast", "mirror", "status"]
+    onExited: function(exitCode) {
+      if (root.mirrorQueue.length > 0) {
+        root.pumpMirror()
+        return
+      }
+      root.pollMirror()
+    }
+  }
+
+  Process {
+    id: mirrorStatusProc
+    command: ["screencast", "mirror", "status"]
+    stdout: StdioCollector {
+      id: mirrorStatusOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var busy = root.mirrorCmdProc.running || root.mirrorQueue.length > 0
+      if (!busy) {
+        var data = null
+        try {
+          data = JSON.parse(String(mirrorStatusOut.text || ""))
+        } catch (e) {
+          data = null
+        }
+        var next = []
+        var list = data && data.sessions ? data.sessions : []
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i]
+          if (!item || !item.id)
+            continue
+          var state = String(item.state || "stopped")
+          if (state === "stopped")
+            continue
+          next.push({
+            id: String(item.id),
+            name: String(item.name || ""),
+            state: state,
+            detail: String(item.detail || ""),
+            url: String(item.url || "")
+          })
+        }
+        root.mirrorSessions = next
+      }
+      if (root.mirrorPollQueued) {
+        root.mirrorPollQueued = false
+        if (!root.mirrorCmdProc.running)
+          root.pollMirror()
+      }
     }
   }
 

@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Screen Cast</title>
+<style type="text/css">
+html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+video, img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; object-fit: contain; background: #000; }
+img { display: none; }
+img.on { display: block; }
+#hud, #sound { position: absolute; bottom: 12px; z-index: 2; margin: 0; padding: 8px 12px; border: 0; border-radius: 8px; background: rgba(0,0,0,0.62); color: #fff; font: 15px/1.35 sans-serif; cursor: pointer; }
+#hud { left: 12px; text-align: left; white-space: pre-line; }
+#sound { right: 12px; }
+#sound.off { display: none; }
+</style>
+</head>
+<body bgcolor="#000000">
+<video id="v" muted autoplay playsinline></video>
+<img id="j" alt="">
+<button id="hud" type="button">stats</button>
+<button id="sound" type="button">Sound</button>
+<noscript><img class="on" src="stream.mjpg" alt=""></noscript>
+<script type="text/javascript">
+var TOKEN = "__TOKEN__";
+var video = null;
+var img = null;
+var ms = null;
+var sb = null;
+var opened = false;
+var failed = false;
+var haveInit = false;
+var sps = null;
+var pps = null;
+var seq = 1;
+var mediaQ = [];
+var pending = [];
+var acc = new Uint8Array(0);
+var pendV = null;
+var pendA = null;
+var audioQ = [];
+var started = false;
+var vdur = 3000;
+var hud = null;
+var sound = null;
+var statsOn = false;
+var lastCatch = 0;
+var frameTimes = [];
+var toggleAt = 0;
+
+function u32(n) {
+  return String.fromCharCode((n / 16777216) & 255, (n / 65536) & 255, (n / 256) & 255, n & 255);
+}
+function u64(n) {
+  if (n < 0) n = 0;
+  var hi = Math.floor(n / 4294967296);
+  var lo = n - hi * 4294967296;
+  return u32(hi) + u32(lo);
+}
+function u16(n) {
+  return String.fromCharCode((n / 256) & 255, n & 255);
+}
+function z(n) {
+  var s = "";
+  while (n--) s += "\0";
+  return s;
+}
+function box(t, b) {
+  return u32(b.length + 8) + t + b;
+}
+function full(t, flags, b) {
+  return box(t, u32(flags) + b);
+}
+function bstr(u8) {
+  var s = "";
+  for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return s;
+}
+function strBytes(s) {
+  var a = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 255;
+  return a;
+}
+function hex2(n) {
+  var s = (n & 255).toString(16);
+  return s.length < 2 ? "0" + s : s;
+}
+function concat(parts) {
+  var n = 0;
+  for (var i = 0; i < parts.length; i++) n += parts[i].length;
+  var out = new Uint8Array(n);
+  var o = 0;
+  for (var i = 0; i < parts.length; i++) {
+    out.set(parts[i], o);
+    o += parts[i].length;
+  }
+  return out;
+}
+
+function spsSize(nal) {
+  try {
+    var rb = [];
+    var p1 = 0;
+    var p2 = 0;
+    for (var i = 0; i < nal.length; i++) {
+      var v = nal[i];
+      if (p2 === 0 && p1 === 0 && v === 3) {
+        p2 = p1;
+        p1 = v;
+        continue;
+      }
+      rb.push(v);
+      p2 = p1;
+      p1 = v;
+    }
+    var bit = 8;
+    function u(n) {
+      var val = 0;
+      for (var k = 0; k < n; k++) {
+        var byte = rb[bit >> 3];
+        if (byte == null) throw 0;
+        val = val * 2 + ((byte >> (7 - (bit & 7))) & 1);
+        bit++;
+      }
+      return val;
+    }
+    function ue() {
+      var zeros = 0;
+      while (u(1) === 0) {
+        zeros++;
+        if (zeros > 20) throw 0;
+      }
+      var rest = 0;
+      var k = zeros;
+      while (k) {
+        rest = rest * 2 + u(1);
+        k--;
+      }
+      var base = 1;
+      for (var i = 0; i < zeros; i++) base *= 2;
+      return base + rest - 1;
+    }
+    function se() {
+      var val = ue();
+      return (val & 1) ? (val + 1) / 2 : -((val / 2) | 0);
+    }
+    var profile = u(8);
+    u(8);
+    u(8);
+    ue();
+    var chroma = 1;
+    var high = {100:1,110:1,122:1,244:1,44:1,83:1,86:1,118:1,128:1,138:1,139:1,134:1,135:1};
+    if (high[profile]) {
+      chroma = ue();
+      if (chroma === 3) u(1);
+      ue();
+      ue();
+      u(1);
+      if (u(1)) {
+        var nlist = chroma !== 3 ? 8 : 12;
+        for (var si = 0; si < nlist; si++) {
+          if (!u(1)) continue;
+          var size = si < 6 ? 16 : 64;
+          var last = 8;
+          var next = 8;
+          for (var j = 0; j < size; j++) {
+            if (next !== 0) {
+              var delta = se();
+              next = (last + delta + 256) % 256;
+              if (next < 0) next += 256;
+            }
+            last = next === 0 ? last : next;
+          }
+        }
+      }
+    }
+    ue();
+    var poc = ue();
+    if (poc === 0) ue();
+    else if (poc === 1) {
+      u(1);
+      se();
+      se();
+      var cnt = ue();
+      for (var pi = 0; pi < cnt; pi++) se();
+    }
+    ue();
+    u(1);
+    var w = (ue() + 1) * 16;
+    var mapH = ue() + 1;
+    var frameOnly = u(1);
+    var h = mapH * 16 * (2 - frameOnly);
+    if (!frameOnly) u(1);
+    u(1);
+    if (u(1)) {
+      var cl = ue();
+      var cr = ue();
+      var ct = ue();
+      var cb = ue();
+      var unit = (chroma === 0 || chroma === 3) ? 1 : 2;
+      var unitY = unit * (frameOnly ? 1 : 2);
+      w -= (cl + cr) * unit;
+      h -= (ct + cb) * unitY;
+    }
+    if (w < 2 || h < 2 || w > 8192 || h > 8192) throw 0;
+    return [w, h];
+  } catch (e) {
+    return [1920, 1080];
+  }
+}
+
+function matrix() {
+  return u32(0x10000) + u32(0) + u32(0) + u32(0) + u32(0x10000) + u32(0) + u32(0) + u32(0) + u32(0x40000000);
+}
+function avcC(spsNal, ppsNal) {
+  var body = String.fromCharCode(1, spsNal[1], spsNal[2], spsNal[3], 255, 225) + u16(spsNal.length) + bstr(spsNal) + String.fromCharCode(1) + u16(ppsNal.length) + bstr(ppsNal);
+  return box("avcC", body);
+}
+function esds() {
+  function desc(tag, body) {
+    return String.fromCharCode(tag, body.length & 127) + body;
+  }
+  var dsi = desc(5, "\x11\x90");
+  var dcd = desc(4, String.fromCharCode(64, 21, 0, 0, 0) + u32(128000) + u32(128000) + dsi);
+  var sl = desc(6, "\x02");
+  var es = desc(3, u16(1) + "\x00" + dcd + sl);
+  return full("esds", 0, es);
+}
+function buildInit(w, h) {
+  var ftyp = box("ftyp", "isom" + u32(0) + "isom" + "iso6" + "mp41");
+  var mvhd = full("mvhd", 0, u32(0) + u32(0) + u32(90000) + u32(0) + u32(0x10000) + u16(0x100) + u16(0) + u32(0) + u32(0) + matrix() + z(24) + u32(3));
+  function trak(id, isVideo, timescale, handler, name, head, entry) {
+    var vol = isVideo ? 0 : 256;
+    var tw = isVideo ? w * 65536 : 0;
+    var th = isVideo ? h * 65536 : 0;
+    var tkhd = full("tkhd", 7, u32(0) + u32(0) + u32(id) + u32(0) + u32(0) + u32(0) + u32(0) + u16(0) + u16(0) + u16(vol) + u16(0) + matrix() + u32(tw) + u32(th));
+    var mdhd = full("mdhd", 0, u32(0) + u32(0) + u32(timescale) + u32(0) + u16(0x55c4) + u16(0));
+    var hdlr = full("hdlr", 0, u32(0) + handler + z(12) + name);
+    var dinf = box("dinf", full("dref", 0, u32(1) + full("url ", 1, "")));
+    var stbl = box("stbl", full("stsd", 0, u32(1) + entry) + full("stts", 0, u32(0)) + full("stsc", 0, u32(0)) + full("stsz", 0, u32(0) + u32(0)) + full("stco", 0, u32(0)));
+    var minf = box("minf", head + dinf + stbl);
+    return box("trak", tkhd + box("mdia", mdhd + hdlr + minf));
+  }
+  var vmhd = full("vmhd", 1, u16(0) + u16(0) + u16(0) + u16(0));
+  var smhd = full("smhd", 0, u16(0) + u16(0));
+  var visual = box("avc1", z(6) + u16(1) + z(16) + u16(w) + u16(h) + u32(0x480000) + u32(0x480000) + u32(0) + u16(1) + z(32) + u16(24) + u16(0xffff) + avcC(sps, pps));
+  var audio = box("mp4a", z(6) + u16(1) + z(8) + u16(2) + u16(16) + u16(0) + u16(0) + u32(48000 * 65536) + esds());
+  var trex1 = full("trex", 0, u32(1) + u32(1) + u32(0) + u32(0) + u32(0));
+  var trex2 = full("trex", 0, u32(2) + u32(1) + u32(0) + u32(0) + u32(0));
+  var vtrak = trak(1, true, 90000, "vide", "VideoHandler\0", vmhd, visual);
+  var atrak = trak(2, false, 48000, "soun", "SoundHandler\0", smhd, audio);
+  return strBytes(ftyp + box("moov", mvhd + vtrak + atrak + box("mvex", trex1 + trex2)));
+}
+
+function nalUnits(data) {
+  var sc = [];
+  for (var i = 0; i + 3 < data.length; i++) {
+    if (data[i] !== 0 || data[i + 1] !== 0) continue;
+    if (data[i + 2] === 1) {
+      sc.push([i, i + 3]);
+      i += 2;
+    } else if (data[i + 2] === 0 && i + 3 < data.length && data[i + 3] === 1) {
+      sc.push([i, i + 4]);
+      i += 3;
+    }
+  }
+  var out = [];
+  for (var s = 0; s < sc.length; s++) {
+    var begin = sc[s][1];
+    var end = s + 1 < sc.length ? sc[s + 1][0] : data.length;
+    while (end > begin + 1 && data[end - 1] === 0) end--;
+    if (begin < end) out.push(data.subarray(begin, end));
+  }
+  return out;
+}
+function sampleFromNals(nals) {
+  var parts = [];
+  var total = 0;
+  var key = false;
+  var vcl = false;
+  for (var i = 0; i < nals.length; i++) {
+    var nal = nals[i];
+    if (!nal.length) continue;
+    var t = nal[0] & 31;
+    if (t === 7) { sps = nal; continue; }
+    if (t === 8) { pps = nal; continue; }
+    if (t !== 1 && t !== 5) continue;
+    vcl = true;
+    if (t === 5) key = true;
+    total += 4 + nal.length;
+    parts.push(nal);
+  }
+  if (!vcl) return null;
+  var out = new Uint8Array(total);
+  var o = 0;
+  for (var p = 0; p < parts.length; p++) {
+    var n = parts[p].length;
+    out[o] = (n / 16777216) & 255;
+    out[o + 1] = (n / 65536) & 255;
+    out[o + 2] = (n / 256) & 255;
+    out[o + 3] = n & 255;
+    out.set(parts[p], o + 4);
+    o += 4 + n;
+  }
+  return { data: out, key: key };
+}
+function adtsFrames(pes) {
+  var frames = [];
+  var i = 0;
+  while (i + 7 <= pes.length) {
+    if (pes[i] !== 255 || (pes[i + 1] & 240) !== 240) { i++; continue; }
+    var b1 = pes[i + 1];
+    var b3 = pes[i + 3];
+    var b4 = pes[i + 4];
+    var b5 = pes[i + 5];
+    var len = ((b3 & 3) * 2048) + (b4 * 8) + ((b5 / 32) & 7);
+    var hdr = (b1 & 1) ? 7 : 9;
+    if (len < hdr || i + len > pes.length) break;
+    frames.push(pes.subarray(i + hdr, i + len));
+    i += len;
+  }
+  return frames;
+}
+function readPts(c) {
+  var b = c[9];
+  var b1 = c[10];
+  var b2 = c[11];
+  var b3 = c[12];
+  var b4 = c[13];
+  return ((b & 14) >> 1) * 1073741824 + b1 * 4194304 + ((b2 & 254) >> 1) * 32768 + b3 * 128 + ((b4 & 254) >> 1);
+}
+function finishPes(pes, isVideo) {
+  if (!pes || !pes.buf.length) return;
+  var data = concat(pes.buf);
+  if (pes.pay && data.length > pes.pay) data = data.subarray(0, pes.pay);
+  if (isVideo) {
+    var smp = sampleFromNals(nalUnits(data));
+    if (smp) {
+      smp.pts = pes.pts;
+      smp.nextPts = pes.nextPts || 0;
+      onVideo(smp);
+    }
+  } else {
+    var frames = adtsFrames(data);
+    for (var i = 0; i < frames.length; i++) audioQ.push({ data: frames[i], pts: pes.pts });
+    while (audioQ.length > 32) audioQ.shift();
+  }
+}
+function onVideo(smp) {
+  if (!started) {
+    if (!smp.key) {
+      audioQ = [];
+      return;
+    }
+    started = true;
+  }
+  var d = vdur;
+  if (smp.nextPts > smp.pts) {
+    var delta = smp.nextPts - smp.pts;
+    if (delta > 0 && delta < 90000) {
+      d = delta;
+      vdur = delta;
+    }
+  }
+  smp.dur = d;
+  holdV.push(smp);
+  holdDur += d;
+  if (holdDur >= 18000 || holdV.length >= 6) flushHold(false);
+  else if (!holdTimer) holdTimer = setTimeout(function() { flushHold(true); }, 220);
+}
+var holdV = [];
+var holdDur = 0;
+var holdTimer = 0;
+var holdWait = 0;
+var nextV = 0;
+var nextA = 0;
+function flushHold(force) {
+  if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; }
+  if (!holdV.length) return;
+  var vTicks = holdDur;
+  var aTicks = Math.round(vTicks * 48000 / 90000);
+  if (aTicks < 1) aTicks = 1;
+  var need = Math.round(aTicks / 1024);
+  if (need < 1) need = 1;
+  if (!force && !holdWait && audioQ.length < need) {
+    holdWait = 1;
+    holdTimer = setTimeout(function() { flushHold(true); }, 80);
+    return;
+  }
+  holdWait = 0;
+  var n = need;
+  if (n > audioQ.length) n = audioQ.length;
+  var audio = [];
+  var i;
+  for (i = 0; i < n; i++) audio.push(audioQ[i]);
+  if (n) audioQ.splice(0, n);
+  var got = 0;
+  if (n) {
+    var last = aTicks - 1024 * (n - 1);
+    if (last < 256 || last > 3072) last = 1024;
+    for (i = 0; i < n - 1; i++) audio[i].dur = 1024;
+    audio[n - 1].dur = last;
+    got = 1024 * (n - 1) + last;
+  }
+  mediaQ.push({ video: holdV, audio: audio, vBase: nextV, aBase: nextA });
+  nextV += vTicks;
+  nextA += got;
+  holdV = [];
+  holdDur = 0;
+  drive();
+}
+function takePacket(pkt) {
+  var b1 = pkt[1];
+  var b3 = pkt[3];
+  var pid = ((b1 & 31) * 256) + pkt[2];
+  if (pid !== 257 && pid !== 258) return;
+  var pusi = (b1 & 64) !== 0;
+  var pos = 4;
+  if (b3 & 32) {
+    if (pos >= 188) return;
+    pos += 1 + pkt[pos];
+    if (pos > 188) return;
+  }
+  if (!(b3 & 16) || pos >= 188) return;
+  var chunk = pkt.subarray(pos);
+  var isV = pid === 257;
+  if (pusi) {
+    var pts = 0;
+    var pay = 0;
+    var body = chunk;
+    if (chunk.length >= 9 && chunk[0] === 0 && chunk[1] === 0 && chunk[2] === 1) {
+      var pesLen = chunk[4] * 256 + chunk[5];
+      var hdr = chunk[8];
+      var start = 9 + hdr;
+      if (chunk.length >= 14 && (chunk[7] & 128)) pts = readPts(chunk);
+      body = start <= chunk.length ? chunk.subarray(start) : new Uint8Array(0);
+      if (pesLen > 3 + hdr) pay = pesLen - 3 - hdr;
+    }
+    if (isV && pendV) pendV.nextPts = pts;
+    finishPes(isV ? pendV : pendA, isV);
+    var cur = { pts: pts, pay: pay, buf: body.length ? [copyBytes(body)] : [] };
+    if (isV) pendV = cur;
+    else pendA = cur;
+  } else if (isV && pendV) pendV.buf.push(copyBytes(chunk));
+  else if (!isV && pendA) pendA.buf.push(copyBytes(chunk));
+}
+function copyBytes(src) {
+  var out = new Uint8Array(src.length);
+  out.set(src, 0);
+  return out;
+}
+function ingest(chunk) {
+  if (!chunk || !chunk.length) return;
+  var n = new Uint8Array(acc.length + chunk.length);
+  n.set(acc, 0);
+  n.set(chunk, acc.length);
+  var off = 0;
+  while (off + 188 <= n.length) {
+    if (n[off] !== 71) { off++; continue; }
+    if (off + 376 <= n.length && n[off + 188] !== 71) { off++; continue; }
+    takePacket(n.subarray(off, off + 188));
+    off += 188;
+  }
+  var rest = n.length - off;
+  if (rest > 4096) rest = 0;
+  acc = new Uint8Array(rest);
+  if (rest) acc.set(n.subarray(n.length - rest), 0);
+}
+
+function buildMedia(videoSamples, audioSamples, vBase, aBase) {
+  if (!videoSamples.length && !audioSamples.length) return null;
+  var prev = 3000;
+  for (var i = 0; i < videoSamples.length; i++) {
+    var d = videoSamples[i].dur;
+    if (!(d > 0) || d > 900000) {
+      d = prev;
+      if (i + 1 < videoSamples.length) d = videoSamples[i + 1].pts - videoSamples[i].pts;
+      if (!(d > 0) || d > 900000) d = prev > 0 ? prev : 3000;
+    }
+    videoSamples[i].dur = d;
+    videoSamples[i].flags = videoSamples[i].key ? 0x02000000 : 0x01010000;
+    prev = d;
+  }
+  for (var a = 0; a < audioSamples.length; a++) {
+    if (!(audioSamples[a].dur > 0)) audioSamples[a].dur = 1024;
+    audioSamples[a].flags = 0x02000000;
+  }
+  function trun(samples, offset) {
+    var body = u32(samples.length) + u32(offset);
+    for (var n = 0; n < samples.length; n++) {
+      body += u32(samples[n].dur) + u32(samples[n].data.length) + u32(samples[n].flags);
+    }
+    return full("trun", 0x701, body);
+  }
+  function traf(track, samples, offset, base) {
+    if (!samples.length) return "";
+    return box("traf", full("tfhd", 0x20000, u32(track)) + full("tfdt", 0x01000000, u64(base)) + trun(samples, offset));
+  }
+  function moof(voff, aoff) {
+    return box("moof", full("mfhd", 0, u32(seq)) + traf(1, videoSamples, voff, vBase) + traf(2, audioSamples, aoff, aBase));
+  }
+  var vbytes = 0;
+  var abytes = 0;
+  for (var vi = 0; vi < videoSamples.length; vi++) vbytes += videoSamples[vi].data.length;
+  for (var ai = 0; ai < audioSamples.length; ai++) abytes += audioSamples[ai].data.length;
+  var probe = moof(0, 0);
+  var voff = probe.length + 8;
+  var aoff = voff + vbytes;
+  var moofStr = moof(voff, aoff);
+  var head = strBytes(moofStr);
+  var mdatSize = 8 + vbytes + abytes;
+  var out = new Uint8Array(head.length + mdatSize);
+  out.set(head, 0);
+  out[head.length] = (mdatSize / 16777216) & 255;
+  out[head.length + 1] = (mdatSize / 65536) & 255;
+  out[head.length + 2] = (mdatSize / 256) & 255;
+  out[head.length + 3] = mdatSize & 255;
+  out[head.length + 4] = 109;
+  out[head.length + 5] = 100;
+  out[head.length + 6] = 97;
+  out[head.length + 7] = 116;
+  var o = head.length + 8;
+  for (var vs = 0; vs < videoSamples.length; vs++) {
+    out.set(videoSamples[vs].data, o);
+    o += videoSamples[vs].data.length;
+  }
+  for (var as = 0; as < audioSamples.length; as++) {
+    out.set(audioSamples[as].data, o);
+    o += audioSamples[as].data.length;
+  }
+  seq++;
+  return out;
+}
+
+function showJpeg() {
+  if (failed) return;
+  failed = true;
+  if (img) {
+    img.className = "on";
+    img.src = "stream.mjpg";
+  }
+  if (video) video.style.display = "none";
+}
+function kick() {
+  if (!video) return;
+  var p = video.play();
+  if (p && p.catch) p.catch(function() {});
+}
+function showSound(playing) {
+  if (!sound) return;
+  sound.className = playing ? "off" : "";
+  if (!playing) {
+    try { sound.focus(); } catch (e) {}
+  }
+}
+function unmute() {
+  if (!video) return;
+  video.muted = false;
+  video.volume = 1;
+  showSound(true);
+  kick();
+}
+function startPlay() {
+  if (!video) return;
+  video.muted = false;
+  var p = video.play();
+  if (!p || !p.then) return;
+  p.then(function() { showSound(true); }).catch(function() {
+    video.muted = true;
+    showSound(false);
+    kick();
+  });
+}
+function append(bytes) {
+  pending.push(bytes);
+  flush();
+}
+function flush() {
+  if (!sb || sb.updating || !pending.length) return;
+  var b = pending.shift();
+  try { sb.appendBuffer(b); }
+  catch (e) { showJpeg(); }
+}
+function catchUp() {
+  if (failed || !sb || !video || sb.updating || video.seeking) return;
+  try {
+    if (!sb.buffered.length) return;
+    var end = sb.buffered.end(sb.buffered.length - 1);
+    var start = sb.buffered.start(0);
+    if (end - start > 3 && video.currentTime - start > 1.5) {
+      sb.remove(0, video.currentTime - 1);
+      return;
+    }
+    var ct = video.currentTime;
+    var i;
+    for (i = 0; i < sb.buffered.length; i++) {
+      var rs = sb.buffered.start(i);
+      var re = sb.buffered.end(i);
+      if (ct >= rs && ct < re) break;
+      if (ct < rs) {
+        video.currentTime = rs + 0.02;
+        return;
+      }
+    }
+    var lag = end - ct;
+    var now = Date.now();
+    if (lag > 1.2 && now - lastCatch > 2000) {
+      lastCatch = now;
+      video.currentTime = Math.max(start, end - 0.5);
+    }
+  } catch (e) {}
+}
+function onUpdate() {
+  if (failed || !sb) return;
+  kick();
+  flush();
+  drive();
+  setTimeout(catchUp, 0);
+}
+function drive() {
+  if (failed) return;
+  if (opened && !sb && sps && pps && sps.length >= 4) {
+    var size = spsSize(sps);
+    var codec = "video/mp4; codecs=\"avc1." + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]) + ", mp4a.40.2\"";
+    if (!window.MediaSource || !MediaSource.isTypeSupported(codec)) { showJpeg(); return; }
+    try { sb = ms.addSourceBuffer(codec); }
+    catch (e) { showJpeg(); return; }
+    sb.mode = "segments";
+    sb.addEventListener("updateend", onUpdate);
+    sb.addEventListener("error", showJpeg);
+    append(buildInit(size[0], size[1]));
+    haveInit = true;
+  }
+  if (haveInit && mediaQ.length && sb && !sb.updating && !pending.length) {
+    var item = mediaQ.shift();
+    var media = buildMedia(item.video, item.audio, item.vBase || 0, item.aBase || 0);
+    if (media) append(media);
+  }
+}
+function liveFeed() {
+  if (failed) return;
+  fetch("hls/" + TOKEN + "/live.ts", { cache: "no-store" }).then(function(r) {
+    if (!r.ok || !r.body || !r.body.getReader) throw 0;
+    var reader = r.body.getReader();
+    function pull() {
+      if (failed) {
+        try { reader.cancel(); } catch (e) {}
+        return;
+      }
+      reader.read().then(function(res) {
+        if (failed) return;
+        if (res.done) { showJpeg(); return; }
+        try { ingest(res.value); }
+        catch (e) { showJpeg(); return; }
+        pull();
+      }).catch(function() { showJpeg(); });
+    }
+    pull();
+  }).catch(function() { showJpeg(); });
+}
+function onOpen() {
+  opened = true;
+  drive();
+}
+function onFrame() {
+  var now = (window.performance && performance.now) ? performance.now() : Date.now();
+  frameTimes.push(now);
+  var cut = now - 1000;
+  while (frameTimes.length && frameTimes[0] < cut) frameTimes.shift();
+  if (video && video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
+}
+function paintHud() {
+  if (!hud) return;
+  if (!statsOn) { hud.textContent = "stats"; return; }
+  var fps = frameTimes.length;
+  var delta = "\u2013";
+  try {
+    if (sb && sb.buffered && sb.buffered.length && video) {
+      var end = sb.buffered.end(sb.buffered.length - 1);
+      var ms = Math.round((end - video.currentTime) * 1000);
+      if (ms < 0) ms = 0;
+      delta = String(ms);
+    }
+  } catch (e) {}
+  hud.textContent = fps + " fps\n" + delta + " ms";
+}
+function syncPreview() {
+  fetch("preview", { cache: "no-store" }).then(function(r) {
+    if (!r.ok) throw 0;
+    return r.text();
+  }).then(function(text) {
+    if (Date.now() - toggleAt < 500) return;
+    var on = text.indexOf("true") !== -1;
+    if (on !== statsOn) { statsOn = on; paintHud(); }
+  }).catch(function() {});
+  setTimeout(syncPreview, 400);
+}
+function toggleStats() {
+  toggleAt = Date.now();
+  statsOn = !statsOn;
+  paintHud();
+  fetch("preview/" + (statsOn ? "on" : "off"), { cache: "no-store" }).then(function(r) {
+    return r.text();
+  }).then(function(text) {
+    statsOn = text.indexOf("true") !== -1;
+    paintHud();
+  }).catch(function() {});
+}
+function boot() {
+  if (typeof document === "undefined" || !document.getElementById) return;
+  video = document.getElementById("v");
+  img = document.getElementById("j");
+  hud = document.getElementById("hud");
+  if (hud) {
+    hud.addEventListener("click", function(ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      toggleStats();
+      unmute();
+    });
+  }
+  sound = document.getElementById("sound");
+  if (sound) {
+    sound.addEventListener("click", function(ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      unmute();
+    });
+  }
+  document.addEventListener("keydown", function(ev) {
+    var key = ev && ev.key;
+    if (key === "Enter" || key === " " || key === "Accept") unmute();
+  });
+  paintHud();
+  syncPreview();
+  setInterval(paintHud, 250);
+  if (video && video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame);
+  if (!video || !window.MediaSource) { showJpeg(); return; }
+  video.muted = false;
+  video.addEventListener("click", function() { unmute(); });
+  ms = new MediaSource();
+  ms.addEventListener("sourceopen", onOpen);
+  ms.addEventListener("error", showJpeg);
+  video.src = URL.createObjectURL(ms);
+  setTimeout(function() { if (!haveInit) showJpeg(); }, 8000);
+  liveFeed();
+  startPlay();
+}
+boot();
+</script>
+</body>
+</html>
