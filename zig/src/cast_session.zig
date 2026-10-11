@@ -32,6 +32,7 @@ pub const Session = struct {
     session_len: usize = 0,
     player: [32]u8 = undefined,
     player_len: usize = 0,
+    logged_behind: f64 = -1,
     media_bad: [300]u8 = undefined,
     media_bad_len: usize = 0,
     failure: [300]u8 = undefined,
@@ -214,13 +215,31 @@ pub const Session = struct {
         };
         for (list.items) |item| {
             const state_name = (item.get("playerState") orelse continue).asString() orelse continue;
-            if (!std.mem.eql(u8, self.player[0..self.player_len], state_name)) {
-                const n = @min(state_name.len, self.player.len);
-                @memcpy(self.player[0..n], state_name[0..n]);
-                self.player_len = n;
-                var log_buf: [96]u8 = undefined;
+            var vw: i64 = 0;
+            var vh: i64 = 0;
+            if (item.get("videoInfo")) |info| {
+                vw = (info.get("width") orelse jsonx.Value{ .null = {} }).asInt() orelse 0;
+                vh = (info.get("height") orelse jsonx.Value{ .null = {} }).asInt() orelse 0;
+            }
+            const playhead = (item.get("currentTime") orelse jsonx.Value{ .null = {} }).asFloat() orelse 0;
+            var edge = playhead;
+            if (item.get("liveSeekableRange")) |range| {
+                edge = (range.get("end") orelse jsonx.Value{ .null = {} }).asFloat() orelse playhead;
+            }
+            var behind = edge - playhead;
+            if (behind < 0) behind = 0;
+            const state_changed = !std.mem.eql(u8, self.player[0..self.player_len], state_name);
+            const lag_jump = self.logged_behind < 0 or @abs(behind - self.logged_behind) >= 0.5;
+            if (state_changed or lag_jump) {
+                if (state_changed) {
+                    const n = @min(state_name.len, self.player.len);
+                    @memcpy(self.player[0..n], state_name[0..n]);
+                    self.player_len = n;
+                }
+                self.logged_behind = behind;
+                var log_buf: [160]u8 = undefined;
                 var log_w: std.Io.File.Writer = .init(.stderr(), self.io, &log_buf);
-                log_w.interface.print("cast player {s}\n", .{self.player[0..self.player_len]}) catch {};
+                log_w.interface.print("cast player {s} {d}x{d} behind {d:.1}s\n", .{ self.player[0..self.player_len], vw, vh, behind }) catch {};
                 log_w.interface.flush() catch {};
             }
             const idle = (item.get("idleReason") orelse continue).asString() orelse continue;

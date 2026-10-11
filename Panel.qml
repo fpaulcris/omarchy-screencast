@@ -320,6 +320,40 @@ Panel {
     mirrorStatusProc.running = true
   }
 
+  // The Wi-Fi search takes a few seconds. A receiver that is already mirroring
+  // is known locally, so keep that row up instead of an empty list.
+  function pinCasting() {
+    var next = (receivers || []).slice()
+    var changed = false
+    for (var i = mirrorSessions.length - 1; i >= 0; i--) {
+      var session = mirrorSessions[i]
+      if (!session || !session.id)
+        continue
+      if (session.state !== "live" && session.state !== "starting")
+        continue
+      var found = false
+      for (var j = 0; j < next.length; j++) {
+        if (next[j] && next[j].id === session.id)
+          found = true
+      }
+      if (!found) {
+        next.unshift({
+          id: session.id,
+          name: session.name || session.id,
+          canMirror: true,
+          protocol: "",
+          model: "",
+          address: "",
+          note: "",
+          protocols: []
+        })
+        changed = true
+      }
+    }
+    if (changed)
+      receivers = next
+  }
+
   function sessionFor(id) {
     for (var i = 0; i < mirrorSessions.length; i++) {
       var item = mirrorSessions[i]
@@ -596,7 +630,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends this screen, and several can be on at once. The switch at the top turns every cast on or off. Browser picture is only the browser, and it can stay on together with a TV. A Fire TV switch sends this desktop to that TV's player. If the player refuses, Screen Cast opens the watch page in the Fire TV browser. If that fails, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
+              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends the desktop chosen below, and several can be on at once. Follow Screen shares the screen you are looking at. A numbered desktop is cast from the monitor that already shows it. If that desktop is not on a monitor, it becomes an extended display beside your screens. The picture size follows that screen. The switch at the top turns every cast on or off. Browser picture is only the browser, and it can stay on together with a TV. A Fire TV switch sends this desktop to that TV's player. If the player refuses, Screen Cast opens the watch page in the Fire TV browser. If that fails, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -632,7 +666,7 @@ Panel {
             Text {
               width: parent.width
               leftPadding: Style.space(12)
-              text: "Follow Screen shares your current desktop. Choose a desktop number to use as an extended display."
+              text: "Follow Screen shares the screen you are looking at. A numbered desktop is cast from the monitor that already shows it, or becomes an extended display when it is not on a monitor."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -702,6 +736,31 @@ Panel {
           }
         }
 
+        Column {
+          width: parent.width
+          visible: !root.showingInfo && root.mode === "receivers"
+          spacing: Style.spacing.labelGap
+
+          Text {
+            text: "Desktop"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Dropdown {
+            width: parent.width
+            showLabel: false
+            value: root.workspaceChoice
+            options: root.desktopOptions
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            onChanged: function(value) {
+              root.workspaceChoice = value
+              root.saveCast(["cast", "--workspace", value])
+            }
+          }
+        }
+
         Rectangle {
           visible: !root.showingInfo && root.mode === "receivers"
           width: parent.width
@@ -721,7 +780,7 @@ Panel {
               leftPadding: Style.space(12)
               topPadding: Style.space(10)
               bottomPadding: Style.space(10)
-              visible: root.scanning
+              visible: root.scanning && root.receivers.length === 0
               text: "Looking for devices"
               color: root.ink
               opacity: 0.8
@@ -1333,6 +1392,7 @@ Panel {
           next.push(entry)
         }
         root.mirrorSessions = next
+        root.pinCasting()
         root.sessionsReady = true
         root.finishChoice()
       }
@@ -1364,6 +1424,7 @@ Panel {
       } else {
         root.scanError = data.error ? String(data.error) : ""
         root.receivers = data.receivers || []
+        root.pinCasting()
         var stillThere = false
         for (var i = 0; i < root.receivers.length; i++) {
           if (root.receivers[i] && root.receivers[i].id === root.receiverChoice)

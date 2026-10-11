@@ -382,7 +382,8 @@ fn waitPlaylist(io: std.Io, path: []const u8) bool {
     while (i < 80) : (i += 1) {
         if (sys.readAll(io, std.heap.page_allocator, path, 64 * 1024)) |text| {
             defer std.heap.page_allocator.free(text);
-            if (std.mem.count(u8, text, "#EXTINF") >= 16 and std.mem.indexOf(u8, text, ".ts") != null) return true;
+            // Ten half-second segments cover the 3s live offset, with spare.
+            if (std.mem.count(u8, text, "#EXTINF") >= 10 and std.mem.indexOf(u8, text, ".ts") != null) return true;
         }
         sys.sleepMs(io, 200);
     }

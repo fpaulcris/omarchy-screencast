@@ -1,6 +1,7 @@
-//! A numbered desktop is recorded from the laptop while that desktop is showing
-//! there. After the laptop switches away, the desktop moves to the headless
-//! screen and the recording follows it.
+//! A numbered desktop is recorded from the real monitor that is already showing
+//! it. When no real monitor shows it, the desktop moves to a headless screen
+//! placed past the other monitors, and the recording follows it. Focusing that
+//! desktop brings it back onto the screen you are looking at.
 const std = @import("std");
 const jsonx = @import("jsonx.zig");
 const state = @import("state.zig");
@@ -11,7 +12,7 @@ const linux = std.os.linux;
 const layout_lua = @embedFile("layout.lua");
 
 pub const Monitor = struct {
-    name: []u8,
+    name: []const u8,
     focused: bool,
     x: i64,
     y: i64,
@@ -20,6 +21,7 @@ pub const Monitor = struct {
     scale: f64,
     workspace: i64,
     disabled: bool,
+    transform: i32,
 };
 
 pub const Cast = struct {
@@ -31,7 +33,7 @@ pub const Cast = struct {
 };
 
 pub const Plan = struct {
-    output: []u8,
+    output: []const u8,
     width: u32,
     height: u32,
     follow: bool,
@@ -89,6 +91,7 @@ pub fn monitors(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator) ![
             .scale = if (item.get("scale")) |n| n.asFloat() orelse 1 else 1,
             .workspace = workspaceId(item),
             .disabled = if (item.get("disabled")) |bit| bit.asBool() orelse false else false,
+            .transform = if (item.get("transform")) |n| @intCast(n.asInt() orelse 0) else 0,
         });
     }
     return out.toOwnedSlice(arena);
@@ -127,9 +130,9 @@ pub const Target = enum { laptop, virtual };
 /// `opening` is the desktop the user just selected on the virtual screen.
 /// Hyprland then bounces focus back to the laptop, so the laptop workspace
 /// alone misses that selection.
-pub fn captureTarget(follow: bool, wanted: i32, laptop_ws: i64, opening: i32) Target {
+pub fn captureTarget(follow: bool, wanted: i32, showing: bool, opening: i32) Target {
     if (follow or wanted < 1) return .laptop;
-    if (laptop_ws == wanted or opening == wanted) return .laptop;
+    if (showing or opening == wanted) return .laptop;
     return .virtual;
 }
 
@@ -143,6 +146,10 @@ pub const FocusKind = enum { stay, bounce, open, laptop };
 
 pub fn noteFocus(focus: *Focus, virtual_output: bool, workspace: i64, now: i64) FocusKind {
     if (workspace < 1 or workspace > 10) return .stay;
+    if (now < ignore_open_until.load(.acquire)) {
+        if (!virtual_output) focus.seen = workspace;
+        return .stay;
+    }
     if (virtual_output) {
         focus.open = @intCast(workspace);
         focus.at = now;
@@ -155,15 +162,78 @@ pub fn noteFocus(focus: *Focus, virtual_output: bool, workspace: i64, now: i64) 
 }
 
 pub fn laptop(items: []const Monitor) ?Monitor {
-    for (items) |item| if (std.mem.startsWith(u8, item.name, "eDP")) return item;
-    for (items) |item| if (!isVirtual(item.name) and !item.disabled and item.width > 0) return item;
-    if (items.len > 0) return items[0];
+    for (items) |item| {
+        if (item.disabled or item.width <= 0 or isVirtual(item.name)) continue;
+        if (std.mem.startsWith(u8, item.name, "eDP")) return item;
+    }
+    for (items) |item| {
+        if (item.disabled or item.width <= 0 or isVirtual(item.name)) continue;
+        return item;
+    }
     return null;
 }
 
 pub fn focused(items: []const Monitor) ?Monitor {
-    for (items) |item| if (item.focused and !isVirtual(item.name)) return item;
+    for (items) |item| {
+        if (item.focused and !item.disabled and item.width > 0 and !isVirtual(item.name)) return item;
+    }
     return laptop(items);
+}
+
+fn axisSwaps(transform: i32) bool {
+    return transform == 1 or transform == 3 or transform == 5 or transform == 7;
+}
+
+/// Right edge past every real monitor. A rotated panel reports its unrotated
+/// mode size, so the span uses the longer side and the headless screen cannot
+/// land on top of that panel.
+fn logicalWidth(item: Monitor) i64 {
+    if (axisSwaps(item.transform)) return @max(item.width, item.height);
+    return item.width;
+}
+
+pub fn freeOrigin(items: []const Monitor) struct { x: i64, y: i64 } {
+    var right: i64 = 0;
+    var top: i64 = 0;
+    var any = false;
+    for (items) |item| {
+        if (item.disabled or item.width <= 0 or isVirtual(item.name)) continue;
+        if (!any or item.y < top) top = item.y;
+        any = true;
+        const edge = item.x + logicalWidth(item);
+        if (edge > right) right = edge;
+    }
+    return .{ .x = right, .y = if (any) top else 0 };
+}
+
+fn overlapsReal(items: []const Monitor, virt: Monitor) bool {
+    const vw: i64 = virt.width;
+    const vh: i64 = virt.height;
+    if (vw <= 0 or vh <= 0) return false;
+    for (items) |item| {
+        if (item.disabled or item.width <= 0 or isVirtual(item.name)) continue;
+        const iw = logicalWidth(item);
+        const ih: i64 = if (axisSwaps(item.transform)) @max(item.width, item.height) else item.height;
+        const separated = virt.x >= item.x + iw or virt.x + vw <= item.x or virt.y >= item.y + ih or virt.y + vh <= item.y;
+        if (!separated) return true;
+    }
+    return false;
+}
+
+fn monitorShowing(items: []const Monitor, workspace: i32) ?Monitor {
+    var found: ?Monitor = null;
+    for (items) |item| {
+        if (item.disabled or item.width <= 0 or isVirtual(item.name)) continue;
+        if (item.workspace != workspace) continue;
+        if (item.focused) return item;
+        if (found == null) found = item;
+    }
+    return found;
+}
+
+fn realHost(items: []const Monitor) []const u8 {
+    if (focused(items)) |item| return item.name;
+    return "";
 }
 
 fn virtualMonitor(items: []const Monitor) ?Monitor {
@@ -186,7 +256,7 @@ fn replaceAll(arena: std.mem.Allocator, text: []const u8, needle: []const u8, re
     return out.toOwnedSlice(arena);
 }
 
-fn runLayout(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtime: []const u8, mode: []const u8, wanted: i32, output: []const u8) ![]u8 {
+fn runLayout(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtime: []const u8, mode: []const u8, wanted: i32, output: []const u8, host: []const u8) ![]u8 {
     const result_path = try sys.join(gpa, runtime, "layout.txt");
     defer gpa.free(result_path);
     sys.removeFile(io, result_path);
@@ -194,6 +264,8 @@ fn runLayout(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runti
     body = try replaceAll(arena, body, "__MODE__", mode);
     const wanted_text = try std.fmt.allocPrint(arena, "{d}", .{wanted});
     body = try replaceAll(arena, body, "__WANTED__", wanted_text);
+    const host_name = if (sys.safeName(host)) host else "";
+    body = try replaceAll(arena, body, "__HOST__", host_name);
     const wrapper = try std.fmt.allocPrint(arena,
         \\local __line = 'ok'
         \\local __ok, __err = pcall(function()
@@ -241,12 +313,11 @@ fn ensureVirtual(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator) !
     return error.Hyprland;
 }
 
-fn configure(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, host: Monitor, output: []const u8, width: u32, height: u32) !void {
-    const scale: f64 = if (host.scale == 0) 1 else host.scale;
-    const pos_x = host.x + host.width;
+fn configure(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, items: []const Monitor, output: []const u8, width: u32, height: u32) !void {
+    const place = freeOrigin(items);
     const code = try std.fmt.allocPrint(arena,
-        "hl.monitor({{ output = \"{s}\", position = \"{d}x{d}\", scale = {d} }}); hl.monitor({{ output = \"{s}\", mode = \"{d}x{d}@60\", position = \"{d}x{d}\", scale = 1 }})",
-        .{ host.name, host.x, host.y, scale, output, width, height, pos_x, host.y },
+        "hl.monitor({{ output = \"{s}\", mode = \"{d}x{d}@60\", position = \"{d}x{d}\", scale = 1 }})",
+        .{ output, width, height, place.x, place.y },
     );
     hypr(io, gpa, &.{ "hyprctl", "eval", code });
 }
@@ -254,7 +325,7 @@ fn configure(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, host:
 pub fn release(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtime: []const u8) void {
     const seen = monitors(arena, io, gpa) catch return;
     const virt = virtualMonitor(seen) orelse return;
-    _ = runLayout(arena, io, gpa, runtime, "release", 0, virt.name) catch {};
+    _ = runLayout(arena, io, gpa, runtime, "release", 0, virt.name, "") catch {};
     hypr(io, gpa, &.{ "hyprctl", "output", "remove", virt.name });
 }
 
@@ -283,8 +354,8 @@ fn fit(cast: Cast, native_w: i64, native_h: i64, virtual_out: bool) struct { w: 
 pub fn previewTarget(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, cast: Cast) !Target {
     if (cast.follow or cast.workspace < 1) return .laptop;
     const seen = try monitors(arena, io, gpa);
-    const host = laptop(seen) orelse return error.Hyprland;
-    return captureTarget(false, cast.workspace, host.workspace, currentOpen());
+    const showing = monitorShowing(seen, cast.workspace) != null;
+    return captureTarget(false, cast.workspace, showing, currentOpen());
 }
 
 pub fn plan(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtime: []const u8, cast: Cast) !Plan {
@@ -319,11 +390,19 @@ pub fn plan(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtim
     const wanted = cast.workspace;
     if (wanted < 1 or wanted > 10) return error.Hyprland;
     const opening = currentOpen();
-    if (host.workspace == wanted and virtualMonitor(seen) == null) {
+    if (opening == wanted) {
+        const dest = focused(seen) orelse host;
+        const virt_name = if (virtualMonitor(seen)) |item| item.name else candidates[0];
+        const line = try runLayout(arena, io, gpa, runtime, "borrow", wanted, virt_name, dest.name);
+        if (!std.mem.startsWith(u8, line, "ok")) return error.Hyprland;
+        if (virtualMonitor(seen) != null) release(arena, io, gpa, runtime);
         clearOpening();
-        const size = fit(cast, host.width, host.height, false);
+        const fresh = monitors(arena, io, gpa) catch seen;
+        const shown = monitorShowing(fresh, wanted) orelse focused(fresh) orelse dest;
+        rememberLaptop(shown.workspace);
+        const size = fit(cast, shown.width, shown.height, false);
         return .{
-            .output = host.name,
+            .output = shown.name,
             .width = size.w,
             .height = size.h,
             .follow = false,
@@ -331,22 +410,11 @@ pub fn plan(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtim
             .workspace = wanted,
         };
     }
-    if (host.workspace == wanted or opening == wanted) {
-        const had_virtual = virtualMonitor(seen) != null;
-        if (host.workspace != wanted) {
-            const virt_name = if (virtualMonitor(seen)) |item| item.name else candidates[0];
-            const line = try runLayout(arena, io, gpa, runtime, "borrow", wanted, virt_name);
-            if (!std.mem.startsWith(u8, line, "ok")) return error.Hyprland;
-        }
-        if (had_virtual or host.workspace != wanted) release(arena, io, gpa, runtime);
-        const fresh = monitors(arena, io, gpa) catch seen;
-        const screen = laptop(fresh) orelse host;
-        if (screen.workspace != wanted) {
-            _ = runLayout(arena, io, gpa, runtime, "borrow", wanted, candidates[0]) catch {};
-        }
+    if (monitorShowing(seen, wanted)) |screen| {
+        if (virtualMonitor(seen) != null) release(arena, io, gpa, runtime);
         clearOpening();
-        const settled = monitors(arena, io, gpa) catch fresh;
-        const shown = laptop(settled) orelse screen;
+        const fresh = monitors(arena, io, gpa) catch seen;
+        const shown = monitorShowing(fresh, wanted) orelse screen;
         rememberLaptop(shown.workspace);
         const size = fit(cast, shown.width, shown.height, false);
         return .{
@@ -361,7 +429,8 @@ pub fn plan(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtim
     clearOpening();
     const size = fit(cast, 0, 0, true);
     if (virtualMonitor(seen)) |virt| {
-        if (virt.workspace == wanted and virt.width == size.w and virt.height == size.h and @abs(virt.scale - 1.0) < 0.01) {
+        const settled = virt.workspace == wanted and virt.width == size.w and virt.height == size.h and @abs(virt.scale - 1.0) < 0.01 and !overlapsReal(seen, virt);
+        if (settled) {
             return .{
                 .output = virt.name,
                 .width = size.w,
@@ -374,12 +443,13 @@ pub fn plan(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runtim
     }
     const output = try ensureVirtual(arena, io, gpa);
     const again = monitors(arena, io, gpa) catch seen;
-    const desk = laptop(again) orelse host;
-    try configure(arena, io, gpa, desk, output, size.w, size.h);
+    const desk = realHost(again);
+    try configure(arena, io, gpa, again, output, size.w, size.h);
     sys.sleepMs(io, 150);
-    const line = try runLayout(arena, io, gpa, runtime, "show", wanted, output);
+    const line = try runLayout(arena, io, gpa, runtime, "show", wanted, output, desk);
     if (!std.mem.startsWith(u8, line, "ok")) return error.Hyprland;
-    _ = runLayout(arena, io, gpa, runtime, "focus", 0, output) catch {};
+    suppressOpen(1500);
+    _ = runLayout(arena, io, gpa, runtime, "focus", 0, output, desk) catch {};
     const parked = monitors(arena, io, gpa) catch again;
     if (laptop(parked)) |item| rememberLaptop(item.workspace);
     return .{
@@ -399,6 +469,9 @@ var dirty = std.atomic.Value(bool).init(false);
 var depart = std.atomic.Value(bool).init(false);
 var cast_ws = std.atomic.Value(i32).init(0);
 var on_laptop = std.atomic.Value(bool).init(false);
+var ignore_open_until = std.atomic.Value(i64).init(0);
+var watch_buf: [80]u8 = undefined;
+var watch_len: usize = 0;
 var desk_gate = std.atomic.Value(u32).init(0);
 var watch_stop = std.atomic.Value(bool).init(false);
 var watch_thread: ?std.Thread = null;
@@ -427,6 +500,13 @@ fn clearOpening() void {
     focus_state.open = 0;
 }
 
+fn suppressOpen(ms: i64) void {
+    lockFocus();
+    defer unlockFocus();
+    ignore_open_until.store(nowMs() + ms, .release);
+    focus_state.open = 0;
+}
+
 fn rememberLaptop(workspace: i64) void {
     if (workspace < 1 or workspace > 10) return;
     lockFocus();
@@ -438,9 +518,14 @@ pub fn setQuiet(on: bool) void {
     quiet.store(on, .release);
 }
 
-pub fn setWatch(workspace: i32, laptop_capture: bool) void {
+pub fn setWatch(workspace: i32, laptop_capture: bool, output: []const u8) void {
     cast_ws.store(workspace, .release);
     on_laptop.store(laptop_capture, .release);
+    lockFocus();
+    defer unlockFocus();
+    const n = @min(output.len, watch_buf.len);
+    @memcpy(watch_buf[0..n], output[0..n]);
+    watch_len = n;
 }
 
 pub fn takeDirty() bool {
@@ -486,16 +571,18 @@ fn noteDesktop(line: []const u8, now_ms: i64) void {
     if (std.mem.startsWith(u8, line, "focusedmon>>") or std.mem.startsWith(u8, line, "focusedmonv2>>")) {
         const parsed = parseFocus(line) orelse return;
         var kind: FocusKind = .stay;
+        var same = false;
         lockFocus();
         kind = noteFocus(&focus_state, parsed.virtual_output, parsed.workspace, now_ms);
         const open = focus_state.open;
+        same = watch_len > 0 and std.mem.eql(u8, watch_buf[0..watch_len], parsed.name);
         unlockFocus();
         if (kind == .stay or kind == .bounce) return;
         dirty.store(true, .release);
         const wanted = cast_ws.load(.acquire);
         const laptop_capture = on_laptop.load(.acquire);
         if (kind == .open and !laptop_capture and open == wanted and wanted > 0) freezePicture();
-        if (kind == .laptop and laptop_capture and parsed.workspace != wanted and wanted > 0) freezePicture();
+        if (kind == .laptop and laptop_capture and same and parsed.workspace != wanted and wanted > 0) freezePicture();
         pokeDesk();
         return;
     }
@@ -514,7 +601,7 @@ fn noteDesktop(line: []const u8, now_ms: i64) void {
     };
 }
 
-const ParsedFocus = struct { virtual_output: bool, workspace: i64 };
+const ParsedFocus = struct { name: []const u8, virtual_output: bool, workspace: i64 };
 
 fn parseFocus(line: []const u8) ?ParsedFocus {
     const mark = std.mem.indexOf(u8, line, ">>") orelse return null;
@@ -523,7 +610,7 @@ fn parseFocus(line: []const u8) ?ParsedFocus {
     const name = payload[0..comma];
     if (!sys.safeName(name)) return null;
     const workspace = std.fmt.parseInt(i64, payload[comma + 1 ..], 10) catch return null;
-    return .{ .virtual_output = isVirtual(name), .workspace = workspace };
+    return .{ .name = name, .virtual_output = isVirtual(name), .workspace = workspace };
 }
 
 pub fn startWatch(env: *const std.process.Environ.Map) void {
@@ -613,15 +700,44 @@ test "layout script keeps the placeholders" {
     try std.testing.expect(std.mem.indexOf(u8, layout_lua, "__OUTPUT__") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_lua, "__MODE__") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_lua, "__WANTED__") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layout_lua, "__HOST__") != null);
     try std.testing.expect(std.mem.indexOf(u8, layout_lua, "borrow") != null);
 }
 
-test "a numbered desktop follows the screen the user is on" {
-    try std.testing.expectEqual(Target.laptop, captureTarget(true, 2, 1, 0));
-    try std.testing.expectEqual(Target.laptop, captureTarget(false, 2, 2, 0));
-    try std.testing.expectEqual(Target.laptop, captureTarget(false, 2, 1, 2));
-    try std.testing.expectEqual(Target.virtual, captureTarget(false, 2, 1, 0));
-    try std.testing.expectEqual(Target.virtual, captureTarget(false, 2, 3, 0));
+test "a numbered desktop stays put when a real screen already shows it" {
+    try std.testing.expectEqual(Target.laptop, captureTarget(true, 2, false, 0));
+    try std.testing.expectEqual(Target.laptop, captureTarget(false, 2, true, 0));
+    try std.testing.expectEqual(Target.laptop, captureTarget(false, 2, false, 2));
+    try std.testing.expectEqual(Target.virtual, captureTarget(false, 2, false, 0));
+    try std.testing.expectEqual(Target.virtual, captureTarget(false, 2, false, 1));
+}
+
+test "the virtual screen sits past a rotated second monitor" {
+    const items = [_]Monitor{
+        .{ .name = "HDMI-A-1", .focused = false, .x = 0, .y = 0, .width = 2560, .height = 1080, .scale = 1, .workspace = 1, .disabled = false, .transform = 0 },
+        .{ .name = "DP-2", .focused = true, .x = 2560, .y = 0, .width = 1920, .height = 1080, .scale = 1, .workspace = 2, .disabled = false, .transform = 3 },
+        .{ .name = "screenmirror", .focused = false, .x = 2560, .y = 0, .width = 1920, .height = 1080, .scale = 1, .workspace = 3, .disabled = false, .transform = 0 },
+    };
+    const place = freeOrigin(&items);
+    try std.testing.expectEqual(@as(i64, 4480), place.x);
+    try std.testing.expectEqual(@as(i64, 0), place.y);
+    try std.testing.expect(overlapsReal(&items, items[2]));
+    const clear = Monitor{
+        .name = "screenmirror",
+        .focused = false,
+        .x = place.x,
+        .y = place.y,
+        .width = 1920,
+        .height = 1080,
+        .scale = 1,
+        .workspace = 4,
+        .disabled = false,
+        .transform = 0,
+    };
+    try std.testing.expect(!overlapsReal(&items, clear));
+    try std.testing.expect(monitorShowing(&items, 2) != null);
+    try std.testing.expectEqualStrings("DP-2", monitorShowing(&items, 2).?.name);
+    try std.testing.expect(monitorShowing(&items, 4) == null);
 }
 
 test "selecting the virtual desktop survives the focus bounce" {

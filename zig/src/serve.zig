@@ -71,7 +71,7 @@ pub fn run(init: std.process.Init) !void {
     };
     try applyPlan(world, planned);
     try preferOutput(world, env);
-    hypr.setWatch(if (planned.follow) 0 else planned.workspace, !planned.follow and !planned.virtual_out);
+    hypr.setWatch(if (planned.follow) 0 else planned.workspace, !planned.follow and !planned.virtual_out, planned.output);
     hypr.startWatch(env);
     defer hypr.finishWatch();
     try writeStatus(world, false);
@@ -138,7 +138,7 @@ pub fn run(init: std.process.Init) !void {
                     state.shutdown.store(true, .release);
                     break;
                 };
-                hypr.setWatch(if (world.follow) 0 else world.workspace, !world.follow and !world.virtual_out);
+                hypr.setWatch(if (world.follow) 0 else world.workspace, !world.follow and !world.virtual_out, world.output);
                 if (world.virtual_out != was_virtual or world.follow != was_follow) {
                     if (world.follow) {
                         log(io, "following this screen\n", .{});
