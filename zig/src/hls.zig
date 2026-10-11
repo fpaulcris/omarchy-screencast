@@ -139,8 +139,9 @@ pub const Writer = struct {
             const ceil: u32 = @intFromFloat(@ceil(seg.dur));
             if (ceil > max_d) max_d = ceil;
         }
-        // Start behind the live edge. A Nest Hub stays on BUFFERING if it is
-        // told to begin half a second from the end of a short live list.
+        // 3s behind the live edge. Closer than that underruns on this Chromecast
+        // and the player then sits about 6s back. Half a second leaves a Nest
+        // Hub sitting on BUFFERING.
         try body.print(self.gpa, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{d}\n#EXT-X-MEDIA-SEQUENCE:{d}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-START:TIME-OFFSET=-3.0,PRECISE=NO\n", .{
             max_d, self.segs[0].index,
         });

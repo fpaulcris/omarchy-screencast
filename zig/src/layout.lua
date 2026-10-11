@@ -1,16 +1,29 @@
 local VIRTUAL = "__OUTPUT__"
 local MODE = "__MODE__"
 local WANTED = __WANTED__
+local HOST = "__HOST__"
+
+local function real_mon(mon)
+  if not mon or not mon.name then return false end
+  if mon.disabled then return false end
+  if mon.name == VIRTUAL or mon.name:sub(1, 8) == "HEADLESS" then return false end
+  return true
+end
 
 local function laptop_mon()
   local mons = hl.get_monitors()
-  for _, mon in ipairs(mons) do
-    if mon.name:sub(1, 3) == "eDP" then return mon end
+  if HOST ~= "" then
+    for _, mon in ipairs(mons) do
+      if real_mon(mon) and mon.name == HOST then return mon end
+    end
   end
   for _, mon in ipairs(mons) do
-    if mon.name ~= VIRTUAL and mon.name:sub(1, 8) ~= "HEADLESS" then return mon end
+    if real_mon(mon) and mon.name:sub(1, 3) == "eDP" then return mon end
   end
-  return mons[1]
+  for _, mon in ipairs(mons) do
+    if real_mon(mon) then return mon end
+  end
+  return nil
 end
 
 local function cursor_on(mon, x, y)

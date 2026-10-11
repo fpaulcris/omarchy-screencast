@@ -28,11 +28,6 @@ pub const Pipeline = struct {
     display: []const u8,
     gsr: ?std.process.Child = null,
     audio: ?std.process.Child = null,
-    // Nest Hub's player rejects the 1920x1080 capture. This second recorder
-    // is the 1280x720 picture Cast loads.
-    cast: ?*hls.Writer = null,
-    cast_gsr: ?std.process.Child = null,
-    cast_thread: ?std.Thread = null,
     video: ?std.Thread = null,
     audio_thread: ?std.Thread = null,
     done: std.atomic.Value(bool) = .init(false),
@@ -89,10 +84,15 @@ pub const Pipeline = struct {
         defer gpa.free(sink);
         self.audio = spawnAudio(io, gpa, &env, sink, log_file);
         if (mode == .gsr) {
+            // Cast players decode the recorder's real picture size. A rotated
+            // monitor is portrait, and a 1280x720 limit then shrinks to a width
+            // that is not a multiple of 16. Chromecast stays on its idle screen.
+            const captured = monitorSize(io, gpa, output) orelse CastSize{ .w = even_w, .h = even_h };
+            const frame = fitCast(captured.w, captured.h);
             var size_buf: [32]u8 = undefined;
-            const size = try std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ even_w, even_h });
+            const size = try std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ frame.w, frame.h });
             var rate_buf: [16]u8 = undefined;
-            const rate = try std.fmt.bufPrint(&rate_buf, "{d}", .{bitrate(even_w, even_h)});
+            const rate = try std.fmt.bufPrint(&rate_buf, "{d}", .{bitrate(frame.w, frame.h)});
             var gsr_argv = [_][]const u8{
                 "/usr/bin/gpu-screen-recorder",
                 "-w",
@@ -116,7 +116,7 @@ pub const Pipeline = struct {
                 "-encoder",
                 "gpu",
                 "-tune",
-                "performance",
+                "quality",
                 "-cursor",
                 "yes",
                 "-ffmpeg-video-opts",
@@ -134,7 +134,6 @@ pub const Pipeline = struct {
             if (self.gsr.?.stdout) |out| widen(out.handle);
             if (self.gsr.?.id) |pid| state.gsr_pid.store(@intCast(pid), .release);
             self.video = try std.Thread.spawn(.{}, videoGsr, .{self});
-            startCastCapture(self, &env, log_file, even_w, even_h);
         } else {
             self.video = try std.Thread.spawn(.{}, screenMain, .{self});
         }
@@ -155,23 +154,16 @@ pub const Pipeline = struct {
         if (self.done.swap(true, .acq_rel)) return;
         const capture_pid = if (self.gsr) |proc| proc.id else null;
         const audio_pid = if (self.audio) |proc| proc.id else null;
-        const cast_pid = if (self.cast_gsr) |proc| proc.id else null;
         state.gsr_pid.store(-1, .release);
         state.audio_pid.store(-1, .release);
         if (capture_pid) |pid| _ = linux.kill(pid, .KILL);
         if (audio_pid) |pid| _ = linux.kill(pid, .KILL);
-        if (cast_pid) |pid| _ = linux.kill(pid, .KILL);
         if (self.video) |thread| thread.join();
-        if (self.cast_thread) |thread| thread.join();
         if (self.audio_thread) |thread| thread.join();
         self.video = null;
-        self.cast_thread = null;
         self.audio_thread = null;
         finishChild(self.io, &self.gsr);
-        finishChild(self.io, &self.cast_gsr);
         finishChild(self.io, &self.audio);
-        if (self.cast) |cast| cast.deinit();
-        self.cast = null;
         self.hls.deinit();
         self.gpa.free(self.output);
     }
@@ -231,112 +223,6 @@ fn spawnAudio(
         .stderr = .{ .file = log_file },
         .environ_map = env,
     }) catch null;
-}
-
-fn startCastCapture(self: *Pipeline, env: *std.process.Environ.Map, log_file: std.Io.File, width: u32, height: u32) void {
-    const size = fitCast(width, height);
-    if (size.w == width and size.h == height) return;
-    const cast_writer = hls.Writer.init(self.io, self.gpa, self.hls.dir) catch return;
-    cast_writer.live = false;
-    self.cast = cast_writer;
-    self.hls.files = false;
-    var size_buf: [32]u8 = undefined;
-    const size_text = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ size.w, size.h }) catch {
-        dropCast(self);
-        return;
-    };
-    var rate_buf: [16]u8 = undefined;
-    const rate = std.fmt.bufPrint(&rate_buf, "{d}", .{bitrate(size.w, size.h)}) catch {
-        dropCast(self);
-        return;
-    };
-    const argv = [_][]const u8{
-        "/usr/bin/gpu-screen-recorder",
-        "-w",
-        self.output,
-        "-c",
-        "flv",
-        "-k",
-        "h264",
-        "-s",
-        size_text,
-        "-f",
-        "30",
-        "-fm",
-        "vfr",
-        "-bm",
-        "cbr",
-        "-q",
-        rate,
-        "-keyint",
-        "0.5",
-        "-encoder",
-        "gpu",
-        "-tune",
-        "performance",
-        "-cursor",
-        "yes",
-        "-ffmpeg-video-opts",
-        "rc-lookahead=0;zerolatency=1;tune=ll",
-        "-o",
-        "/dev/stdout",
-    };
-    self.cast_gsr = std.process.spawn(self.io, .{
-        .argv = &argv,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .{ .file = log_file },
-        .environ_map = env,
-    }) catch null;
-    if (self.cast_gsr == null) {
-        note(self, "cast recorder failed to start\n");
-        dropCast(self);
-        return;
-    }
-    if (self.cast_gsr.?.stdout) |out| widen(out.handle);
-    self.cast_thread = std.Thread.spawn(.{}, videoCast, .{self}) catch {
-        note(self, "cast recorder thread failed\n");
-        const pid = if (self.cast_gsr) |proc| proc.id else null;
-        if (pid) |id| _ = linux.kill(id, .KILL);
-        finishChild(self.io, &self.cast_gsr);
-        dropCast(self);
-        return;
-    };
-}
-
-fn dropCast(self: *Pipeline) void {
-    self.hls.files = true;
-    if (self.cast) |cast| cast.deinit();
-    self.cast = null;
-}
-
-fn videoCast(self: *Pipeline) void {
-    const cast_out = (self.cast_gsr orelse return).stdout orelse return;
-    const cast = self.cast orelse return;
-    const storage = self.gpa.alloc(u8, 4 * 1024 * 1024) catch return;
-    defer self.gpa.free(storage);
-    const au = self.gpa.alloc(u8, flv.au_max) catch return;
-    defer self.gpa.free(au);
-    var parser = flv.Parser{ .buf = storage };
-    var chunk: [65536]u8 = undefined;
-    while (!self.done.load(.acquire) and !self.world.stop.load(.acquire)) {
-        const n = cast_out.readStreaming(self.io, &.{&chunk}) catch break;
-        if (n == 0) break;
-        var outcome = parser.push(chunk[0..n], au);
-        while (true) {
-            switch (outcome) {
-                .none => break,
-                .broken => {
-                    parser.reset();
-                    break;
-                },
-                .frame => |frame| {
-                    cast.pushVideo(au[0..frame.len], @as(u64, frame.ts) * 90, frame.key);
-                    outcome = parser.next(au);
-                },
-            }
-        }
-    }
 }
 
 fn videoGsr(self: *Pipeline) void {
@@ -453,8 +339,6 @@ fn audioMain(self: *Pipeline) void {
                 if (self.done.load(.acquire) or self.world.stop.load(.acquire)) return;
                 pauseMs(5);
             }
-            // A full Cast queue must not stall the browser stream.
-            if (self.cast) |cast| _ = cast.pushAudio(adts[0..n], pts);
             pts += 1920;
         }
         // Pace silence. A recording read already blocks on the pipe.
@@ -517,43 +401,108 @@ fn streamFps(width: u32, height: u32) u32 {
 
 const CastSize = struct { w: u32, h: u32 };
 
+// gpu-screen-recorder -s is a limit. The file shrinks to the captured aspect,
+// so the requested size has to be that aspect or one side lands off the 16-pixel
+// grid Chromecast can decode. Landscape stops at the H.264 level 4.2 frame
+// every Chromecast accepts (2048 wide, no taller than 1080). A 2560x1080
+// screen then becomes 2048x864 instead of a blurry 1024x432. Portrait stays
+// inside 720x1280, which already plays. Nothing is scaled up.
 fn fitCast(width: u32, height: u32) CastSize {
-    const max_w: u32 = 1280;
-    const max_h: u32 = 720;
-    if (width <= max_w and height <= max_h) return .{ .w = width, .h = height };
-    if (max_w * height <= max_h * width) {
-        var fitted = max_w * height / width;
-        fitted &= ~@as(u32, 1);
-        if (fitted < 2) fitted = 2;
-        return .{ .w = max_w, .h = fitted };
+    if (width < 2 or height < 2) return .{ .w = 1280, .h = 720 };
+    const portrait = height > width;
+    const max_w: u32 = if (portrait) 720 else 2048;
+    const max_h: u32 = if (portrait) 1280 else 1080;
+    if (width % 16 == 0 and height % 16 == 0 and width <= max_w and height <= max_h) {
+        return .{ .w = width, .h = height };
     }
-    var fitted = max_h * width / height;
-    fitted &= ~@as(u32, 1);
-    if (fitted < 2) fitted = 2;
-    return .{ .w = fitted, .h = max_h };
+    const div = gcdU(width, height);
+    const rw = width / div;
+    const rh = height / div;
+    const step = lcmU(alignStep(rw), alignStep(rh));
+    var k: u32 = step;
+    var best: u32 = 0;
+    while (k > 0 and rw > 0 and rh > 0) {
+        if (k > max_w / rw or k > max_h / rh or k > width / rw or k > height / rh) break;
+        const ow = k * rw;
+        const oh = k * rh;
+        if (ow >= 16 and oh >= 16) best = k;
+        const next = std.math.add(u32, k, step) catch break;
+        k = next;
+    }
+    if (best == 0) return if (portrait) .{ .w = 720, .h = 1280 } else .{ .w = 1280, .h = 720 };
+    return .{ .w = best * rw, .h = best * rh };
+}
+
+fn monitorSize(io: std.Io, gpa: std.mem.Allocator, output: []const u8) ?CastSize {
+    if (!sys.safeName(output)) return null;
+    const result = sys.run(gpa, io, &.{ "/usr/bin/gpu-screen-recorder", "--list-monitors" }, 3000, 64 * 1024) catch return null;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const bar = std.mem.indexOfScalar(u8, trimmed, '|') orelse continue;
+        if (!std.mem.eql(u8, trimmed[0..bar], output)) continue;
+        const dim = trimmed[bar + 1 ..];
+        const mark = std.mem.indexOfScalar(u8, dim, 'x') orelse continue;
+        const w = std.fmt.parseInt(u32, dim[0..mark], 10) catch continue;
+        const h = std.fmt.parseInt(u32, dim[mark + 1 ..], 10) catch continue;
+        if (w < 2 or h < 2) continue;
+        return .{ .w = w, .h = h };
+    }
+    return null;
+}
+
+fn gcdU(a: u32, b: u32) u32 {
+    var x = a;
+    var y = b;
+    while (y != 0) {
+        const t = x % y;
+        x = y;
+        y = t;
+    }
+    return if (x == 0) 1 else x;
+}
+
+fn lcmU(a: u32, b: u32) u32 {
+    return a / gcdU(a, b) * b;
+}
+
+fn alignStep(reduced: u32) u32 {
+    return 16 / gcdU(reduced, 16);
 }
 
 fn bitrate(width: u32, height: u32) u32 {
-    const pixels = width * height;
-    if (pixels <= 1280 * 720) return 4000;
-    if (pixels <= 1920 * 1080) return 8000;
-    if (pixels <= 2560 * 1440) return 12000;
-    return 20000;
+    // This Chromecast holds the live picture at about 4 Mbps. 8 Mbps and above
+    // underrun, and the player then sits around 8s behind instead of 4s.
+    _ = width;
+    _ = height;
+    return 4000;
 }
 
-test "cast picture fits inside 1280x720" {
+test "cast picture stays on a 16 pixel grid" {
     const hd = fitCast(1920, 1080);
-    try std.testing.expectEqual(@as(u32, 1280), hd.w);
-    try std.testing.expectEqual(@as(u32, 720), hd.h);
+    try std.testing.expectEqual(@as(u32, 1792), hd.w);
+    try std.testing.expectEqual(@as(u32, 1008), hd.h);
     const same = fitCast(1280, 720);
     try std.testing.expectEqual(@as(u32, 1280), same.w);
     try std.testing.expectEqual(@as(u32, 720), same.h);
     const small = fitCast(800, 600);
-    try std.testing.expectEqual(@as(u32, 800), small.w);
-    try std.testing.expectEqual(@as(u32, 600), small.h);
+    try std.testing.expectEqual(@as(u32, 768), small.w);
+    try std.testing.expectEqual(@as(u32, 576), small.h);
     const wide = fitCast(1920, 1200);
-    try std.testing.expectEqual(@as(u32, 1152), wide.w);
-    try std.testing.expectEqual(@as(u32, 720), wide.h);
+    try std.testing.expectEqual(@as(u32, 1664), wide.w);
+    try std.testing.expectEqual(@as(u32, 1040), wide.h);
+    const turned = fitCast(1080, 1920);
+    try std.testing.expectEqual(@as(u32, 720), turned.w);
+    try std.testing.expectEqual(@as(u32, 1280), turned.h);
+    const ultra = fitCast(2560, 1080);
+    try std.testing.expectEqual(@as(u32, 2048), ultra.w);
+    try std.testing.expectEqual(@as(u32, 864), ultra.h);
+    for ([_]CastSize{ hd, same, small, wide, turned, ultra }) |item| {
+        try std.testing.expectEqual(@as(u32, 0), item.w % 16);
+        try std.testing.expectEqual(@as(u32, 0), item.h % 16);
+    }
 }
 
 fn defaultSink(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
