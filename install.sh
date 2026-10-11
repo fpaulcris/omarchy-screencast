@@ -153,8 +153,11 @@ cmd_uninstall() {
 
 cmd_install() {
   build_bin
+  if [[ ! -x /usr/bin/wf-recorder ]]; then
+    echo "screenmirror: wf-recorder is not installed. The browser picture needs it." >&2
+  fi
   if [[ ! -x /usr/bin/gpu-screen-recorder ]]; then
-    echo "screenmirror: gpu-screen-recorder is not installed. The stream uses the built-in screen copy." >&2
+    echo "screenmirror: gpu-screen-recorder is not installed. A receiver cast uses the built-in screen copy." >&2
   fi
   if [[ ! -x /usr/bin/pw-record && ! -x /usr/bin/parecord ]]; then
     echo "screenmirror: neither pw-record nor parecord is installed. The cast will be silent." >&2
@@ -215,7 +218,8 @@ case "${1:-install}" in
     else
       echo "zig: no"
     fi
-    [[ -x /usr/bin/gpu-screen-recorder ]] && echo "gpu-screen-recorder: yes" || echo "gpu-screen-recorder: no (built-in screen copy)"
+    [[ -x /usr/bin/wf-recorder ]] && echo "wf-recorder: yes" || echo "wf-recorder: no (browser picture needs it)"
+    [[ -x /usr/bin/gpu-screen-recorder ]] && echo "gpu-screen-recorder: yes" || echo "gpu-screen-recorder: no (receiver cast uses built-in screen copy)"
     if [[ -x /usr/bin/pw-record ]]; then
       echo "pw-record: yes"
     elif [[ -x /usr/bin/parecord ]]; then

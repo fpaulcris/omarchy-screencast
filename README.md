@@ -22,7 +22,8 @@ Enabling the plugin places the Screen Cast button on the right side of the bar. 
 ## What you need
 
 - Zig 0.17, used by `install.sh` to build the `screencast` binary
-- `gpu-screen-recorder`, which captures the screen when it is installed. The stream still starts without it, using the built-in screen copy
+- `wf-recorder`, which encodes the browser picture as GPU JPEG. Without VAAPI JPEG it uses the same recorder on the CPU
+- `gpu-screen-recorder`, which encodes H.264 when a Chromecast, AirPlay, Miracast, or Fire TV receiver is on. The cast still starts without it, using the built-in screen copy
 - `pw-record` or `parecord`, which records the speakers into the cast. If neither is installed, the picture still plays and the cast is silent
 - `avahi`, which the panel uses to list receivers on this Wi-Fi
 - `qrencode` is optional. The window still shows the address without a QR code.
@@ -51,7 +52,7 @@ o.window({ class = "screenmirror" }, { float = true, center = true, size = { 780
 - Machine status: `screencast status --json`
 - Frame rate and delay stays off until you turn it on. The panel switch, the corner of the browser picture, or `screencast preview on` shows frames per second and how many milliseconds of picture are still waiting. `screencast preview off` hides them again.
 
-On the TV, open the internet browser and go to the address on screen. The page plays H.264 video and AAC sound. Samsung, LG, Sony Android, and Android TV browsers get that page. Press OK, or the Sound button, if the TV starts silent. Older Panasonic, Sharp, and HbbTV browsers get a JPEG picture and no sound. The service is not started at login.
+On the TV, open the internet browser and go to the address on screen. The page is a GPU JPEG stream: each picture is sharp, and the viewer stays on the newest frame. The browser picture has no sound. Sound goes with a receiver cast. Panasonic, Samsung, LG, Sony, and other older TV browsers get one JPEG at a time instead of the multipart stream. The service is not started at login.
 
 ## Remove
 

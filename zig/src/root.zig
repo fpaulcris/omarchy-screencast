@@ -21,6 +21,9 @@ pub const cli = @import("cli.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("httpd.zig");
+    _ = @import("mjpeg.zig");
+    _ = @import("serve.zig");
 }
 
 const std = @import("std");

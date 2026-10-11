@@ -3,6 +3,8 @@ const hls = @import("hls.zig");
 const state = @import("state.zig");
 const sys = @import("sys.zig");
 
+const linux = std.os.linux;
+
 const watch_html = @embedFile("watch.html");
 
 const html =
@@ -12,10 +14,33 @@ const html =
     \\<style type="text/css">
     \\html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
     \\img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; object-fit: contain; }
+    \\#hud { display: none; position: absolute; left: 12px; bottom: 12px; margin: 0; padding: 8px 12px; border-radius: 8px; background: rgba(0,0,0,0.62); color: #fff; font: 15px/1.35 sans-serif; white-space: pre-line; }
     \\</style>
     \\</head>
     \\<body bgcolor="#000000">
-    \\<img src="stream.mjpg" alt="">
+    \\<img id="p" src="stream.mjpg" alt="">
+    \\<p id="hud"></p>
+    \\<script type="text/javascript">
+    \\var hud = document.getElementById("hud");
+    \\var on = false;
+    \\function show(text) {
+    \\  if (!hud) return;
+    \\  hud.style.display = on ? "block" : "none";
+    \\  if (on) hud.textContent = text;
+    \\}
+    \\function tick() {
+    \\  fetch("preview", {cache:"no-store"}).then(function(r){ return r.text(); }).then(function(t){
+    \\    on = t.indexOf("true") !== -1;
+    \\    if (!on) { show(""); return; }
+    \\    return fetch("pace", {cache:"no-store"}).then(function(r){ return r.json(); }).then(function(p){
+    \\      var age = p.age < 0 ? "\u2013" : String(p.age);
+    \\      show(p.fps + " fps\n" + age + " ms");
+    \\    });
+    \\  }).catch(function(){});
+    \\  setTimeout(tick, 400);
+    \\}
+    \\tick();
+    \\</script>
     \\</body>
     \\</html>
 ;
@@ -46,7 +71,7 @@ const poll_html =
 ;
 
 const old_markers = [_][]const u8{
-    "viera", "panasonic", "netfront", "hbbtv", "netcast", "aquos",
+    "viera", "panasonic", "netfront", "hbbtv", "smarttv", "smart-tv", "bravia", "tizen", "webos", "web0s", "netcast", "aquos",
 };
 
 pub fn serve(world: *state.World, port: u16) void {
@@ -83,10 +108,10 @@ fn handle(world: *state.World, stream: std.Io.net.Stream) void {
     var writer = stream.writer(world.io, &wbuf);
     const out = &writer.interface;
     if (std.mem.eql(u8, path, "/") or std.mem.eql(u8, path, "/index.html")) {
-        if (oldTv(req)) {
-            send(out, 200, "text/html", poll_html, false) catch {};
-            return;
-        }
+        if (oldTv(req)) send(out, 200, "text/html", poll_html, false) catch {} else send(out, 200, "text/html", html, false) catch {};
+        return;
+    }
+    if (std.mem.eql(u8, path, "/watch")) {
         if (hls.readToken(world.io, world.gpa, world.runtime)) |token| {
             sendWatch(out, token) catch send(out, 200, "text/html", html, false) catch {};
             return;
@@ -119,7 +144,15 @@ fn handle(world: *state.World, stream: std.Io.net.Stream) void {
         } else send(out, 503, "text/plain", "starting\n", false) catch {};
         return;
     }
+    if (std.mem.eql(u8, path, "/pace")) {
+        const pace = state.readPace(world.io);
+        var pace_buf: [64]u8 = undefined;
+        const body = std.fmt.bufPrint(&pace_buf, "{{\"fps\":{d},\"age\":{d}}}\n", .{ pace.fps, pace.age }) catch return;
+        send(out, 200, "application/json", body, false) catch {};
+        return;
+    }
     if (std.mem.eql(u8, path, "/stream.mjpg") or std.mem.eql(u8, path, "/live.mjpg")) {
+        nodelay(stream.socket.handle);
         streamMjpeg(world, out) catch {};
         return;
     }
@@ -212,26 +245,31 @@ fn streamLive(world: *state.World, out: *std.Io.Writer) !void {
     out.flush() catch {};
 }
 
+fn nodelay(fd: std.posix.fd_t) void {
+    const one: i32 = 1;
+    _ = linux.setsockopt(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one).ptr, @sizeOf(i32));
+}
+
 fn streamMjpeg(world: *state.World, out: *std.Io.Writer) !void {
     try out.writeAll("HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
     try out.flush();
     const jpeg = try world.gpa.alloc(u8, state.frame_cap);
     defer world.gpa.free(jpeg);
     var last: u64 = 0;
+    var seen = state.frameGate();
     while (!world.stop.load(.acquire)) {
-        const got = world.copyFrame(jpeg) orelse {
-            sys.sleepMs(world.io, 40);
-            continue;
-        };
-        if (got.id == last) {
-            sys.sleepMs(world.io, 30);
-            continue;
+        if (world.copyFrame(jpeg)) |got| {
+            if (got.id != last) {
+                last = got.id;
+                seen = state.frameGate();
+                try out.print("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {d}\r\n\r\n", .{got.len});
+                try out.writeAll(jpeg[0..got.len]);
+                try out.writeAll("\r\n");
+                try out.flush();
+                continue;
+            }
         }
-        last = got.id;
-        try out.print("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {d}\r\n\r\n", .{got.len});
-        try out.writeAll(jpeg[0..got.len]);
-        try out.writeAll("\r\n");
-        try out.flush();
+        seen = state.waitFrames(seen, 500);
     }
 }
 
@@ -321,14 +359,14 @@ fn log(world: *state.World, comptime fmt: []const u8, args: anytype) void {
     err_w.interface.flush() catch {};
 }
 
-test "living room browsers get the picture with sound" {
+test "tv browsers get one jpeg instead of the video page" {
     const tizen = "GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36\r\n\r\n";
     const webos = "GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 Chrome/87.0.4280.88\r\n\r\n";
     const bravia = "GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (Linux; Android 12; BRAVIA 4K VH2) AppleWebKit/537.36 Chrome/108.0\r\n\r\n";
     const desktop = "GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/154.0.0.0\r\n\r\n";
-    try std.testing.expect(!oldTv(tizen));
-    try std.testing.expect(!oldTv(webos));
-    try std.testing.expect(!oldTv(bravia));
+    try std.testing.expect(oldTv(tizen));
+    try std.testing.expect(oldTv(webos));
+    try std.testing.expect(oldTv(bravia));
     try std.testing.expect(!oldTv(desktop));
     try std.testing.expect(oldTv("GET / HTTP/1.1\r\nUser-Agent: Mozilla/5.0 (Linux; U; Viera)\r\n\r\n"));
     try std.testing.expect(oldTv("GET / HTTP/1.1\r\nUser-Agent: HbbTV/1.5.1\r\n\r\n"));

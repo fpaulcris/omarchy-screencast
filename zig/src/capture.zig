@@ -1,12 +1,12 @@
-//! One process captures the screen. gpu-screen-recorder's H.264 is remuxed into
-//! HLS. If it produces no video, Hyprland screencopy frames are encoded here.
-//! Desktop audio is PCM from pw-record or parecord, encoded as AAC-LC.
+//! Device cast. gpu-screen-recorder's H.264 is remuxed into HLS. If it produces
+//! no video, Hyprland screencopy frames are encoded here. The browser picture
+//! is a separate GPU JPEG capture. Desktop audio is PCM from pw-record or
+//! parecord, encoded as AAC-LC.
 const std = @import("std");
 const aac = @import("aac.zig");
 const flv = @import("flv.zig");
 const h264enc = @import("h264enc.zig");
 const hls = @import("hls.zig");
-const jpeg = @import("jpeg.zig");
 const screencopy = @import("screencopy.zig");
 const state = @import("state.zig");
 const sys = @import("sys.zig");
@@ -29,13 +29,12 @@ pub const Pipeline = struct {
     gsr: ?std.process.Child = null,
     audio: ?std.process.Child = null,
     // Nest Hub's player rejects the 1920x1080 capture. This second recorder
-    // is the 1280x720 picture Cast loads. The browser keeps the full stream.
+    // is the 1280x720 picture Cast loads.
     cast: ?*hls.Writer = null,
     cast_gsr: ?std.process.Child = null,
     cast_thread: ?std.Thread = null,
     video: ?std.Thread = null,
     audio_thread: ?std.Thread = null,
-    preview: ?std.Thread = null,
     done: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     hls: *hls.Writer,
@@ -135,7 +134,6 @@ pub const Pipeline = struct {
             if (self.gsr.?.stdout) |out| widen(out.handle);
             if (self.gsr.?.id) |pid| state.gsr_pid.store(@intCast(pid), .release);
             self.video = try std.Thread.spawn(.{}, videoGsr, .{self});
-            self.preview = try std.Thread.spawn(.{}, previewMain, .{self});
             startCastCapture(self, &env, log_file, even_w, even_h);
         } else {
             self.video = try std.Thread.spawn(.{}, screenMain, .{self});
@@ -165,11 +163,9 @@ pub const Pipeline = struct {
         if (cast_pid) |pid| _ = linux.kill(pid, .KILL);
         if (self.video) |thread| thread.join();
         if (self.cast_thread) |thread| thread.join();
-        if (self.preview) |thread| thread.join();
         if (self.audio_thread) |thread| thread.join();
         self.video = null;
         self.cast_thread = null;
-        self.preview = null;
         self.audio_thread = null;
         finishChild(self.io, &self.gsr);
         finishChild(self.io, &self.cast_gsr);
@@ -407,7 +403,6 @@ fn screenMain(self: *Pipeline) void {
             break;
         };
         defer shot.deinit();
-        publishJpeg(self, shot.pixels, shot.width, shot.height, shot.stride);
         if (enc == null or enc.?.width != shot.width or enc.?.height != shot.height) {
             if (enc) |item| item.deinit();
             enc = h264enc.Encoder.init(self.gpa, shot.width, shot.height, self.fps) catch {
@@ -423,28 +418,6 @@ fn screenMain(self: *Pipeline) void {
         const spent = sys.monoMs(self.io) - started;
         if (spent < period) sys.sleepMs(self.io, period - spent);
     }
-}
-
-fn previewMain(self: *Pipeline) void {
-    const client = screencopy.Client.connect(self.gpa, self.xdg, self.display, &self.done) orelse return;
-    defer client.deinit();
-    while (!self.done.load(.acquire) and !self.world.stop.load(.acquire)) {
-        const started = sys.monoMs(self.io);
-        var shot = client.grab(self.output, self.width, self.height) orelse {
-            if (self.done.load(.acquire) or self.world.stop.load(.acquire)) break;
-            break;
-        };
-        defer shot.deinit();
-        publishJpeg(self, shot.pixels, shot.width, shot.height, shot.stride);
-        const spent = sys.monoMs(self.io) - started;
-        if (spent < 200) sys.sleepMs(self.io, 200 - spent);
-    }
-}
-
-fn publishJpeg(self: *Pipeline, pixels: []const u8, width: u32, height: u32, stride: u32) void {
-    const jpg = jpeg.encodeBgra(self.gpa, pixels, width, height, stride) catch return;
-    defer self.gpa.free(jpg);
-    self.world.publish(jpg);
 }
 
 fn audioMain(self: *Pipeline) void {
