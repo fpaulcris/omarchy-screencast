@@ -55,6 +55,10 @@ const usage_text =
     \\  screencast dial stop <id-or-ip> <App>
     \\  screencast preview [on|off|toggle]
     \\                          Frame rate and delay on the browser picture
+    \\  screencast panel --json
+    \\                          Last panel tab, and whether the browser picture is on
+    \\  screencast panel --mode receivers|browser --browser on|off
+    \\                          Remember that tab and the browser switch
     \\  screencast help
     \\
 ;
@@ -83,6 +87,7 @@ pub fn run(init: std.process.Init) !void {
     if (eql(cmd, "mirror")) return cmdMirror(init, args[2..]);
     if (eql(cmd, "dial")) return dial.command(init, args[2..]);
     if (eql(cmd, "preview")) return cmdPreview(init, args[2..]);
+    if (eql(cmd, "panel")) return cmdPanel(init, args[2..]);
     if (eql(cmd, "help") or eql(cmd, "-h") or eql(cmd, "--help")) {
         try writeStdout(init.io, usage_text);
         try writeStdout(init.io, same_wifi);
@@ -832,6 +837,98 @@ fn focusCastWindow(io: std.Io, gpa: std.mem.Allocator) void {
 fn stringField(value: jsonx.Value, key: []const u8) []const u8 {
     const item = value.get(key) orelse return "";
     return item.asString() orelse "";
+}
+
+fn cmdPanel(init: std.process.Init, args: []const []const u8) !void {
+    const io = init.io;
+    const gpa = init.gpa;
+    const path = try panelPath(gpa, init.environ_map);
+    defer gpa.free(path);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    var mode = loadPanelMode(arena_state.allocator(), io, gpa, path);
+    var browser = loadPanelBrowser(io, gpa, path);
+    var known = loadPanelKnown(io, gpa, path);
+    var i: usize = 0;
+    var changed = false;
+    while (i < args.len) : (i += 1) {
+        if (eql(args[i], "--json")) continue;
+        if (eql(args[i], "--mode") and i + 1 < args.len) {
+            i += 1;
+            if (!eql(args[i], "browser") and !eql(args[i], "receivers")) {
+                try writeStderr(io, "panel mode is receivers or browser\n");
+                std.process.exit(2);
+            }
+            mode = args[i];
+            changed = true;
+            continue;
+        }
+        if (eql(args[i], "--browser") and i + 1 < args.len) {
+            i += 1;
+            if (eql(args[i], "on")) browser = true else if (eql(args[i], "off")) browser = false else {
+                try writeStderr(io, "panel browser is on or off\n");
+                std.process.exit(2);
+            }
+            changed = true;
+            continue;
+        }
+        try writeStderr(io, "usage: screencast panel --json [--mode receivers|browser] [--browser on|off]\n");
+        std.process.exit(2);
+    }
+    if (changed) {
+        known = true;
+        try savePanel(io, gpa, path, mode, browser);
+    }
+    try printStdout(io, "{{\"mode\":{s},\"browser\":{s},\"known\":{s}}}\n", .{
+        if (eql(mode, "browser")) "\"browser\"" else "\"receivers\"",
+        if (browser) "true" else "false",
+        if (known) "true" else "false",
+    });
+}
+
+fn panelPath(gpa: std.mem.Allocator, map: *const std.process.Environ.Map) ![]u8 {
+    const home = sys.envGet(map, "HOME") orelse return error.NoHome;
+    return std.fmt.allocPrint(gpa, "{s}/.config/screenmirror/panel.json", .{home});
+}
+
+fn loadPanelMode(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, path: []const u8) []const u8 {
+    const text = sys.readAll(io, gpa, path, 512) orelse return "receivers";
+    defer gpa.free(text);
+    const value = jsonx.parse(arena, text) catch return "receivers";
+    const item = value.get("mode") orelse return "receivers";
+    const mode = item.asString() orelse return "receivers";
+    if (std.mem.eql(u8, mode, "browser")) return "browser";
+    return "receivers";
+}
+
+fn loadPanelBrowser(io: std.Io, gpa: std.mem.Allocator, path: []const u8) bool {
+    const text = sys.readAll(io, gpa, path, 512) orelse return false;
+    defer gpa.free(text);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const value = jsonx.parse(arena_state.allocator(), text) catch return false;
+    const item = value.get("browser") orelse return false;
+    return item.asBool() orelse false;
+}
+
+fn loadPanelKnown(io: std.Io, gpa: std.mem.Allocator, path: []const u8) bool {
+    const text = sys.readAll(io, gpa, path, 512) orelse return false;
+    defer gpa.free(text);
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const value = jsonx.parse(arena_state.allocator(), text) catch return false;
+    const item = value.get("known") orelse return false;
+    return item.asBool() orelse false;
+}
+
+fn savePanel(io: std.Io, gpa: std.mem.Allocator, path: []const u8, mode: []const u8, browser: bool) !void {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |cut| sys.ensureDir(io, path[0..cut]);
+    const body = try std.fmt.allocPrint(gpa, "{{\"mode\":\"{s}\",\"browser\":{s},\"known\":true}}\n", .{
+        if (std.mem.eql(u8, mode, "browser")) "browser" else "receivers",
+        if (browser) "true" else "false",
+    });
+    defer gpa.free(body);
+    try sys.writeAll(io, path, body);
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

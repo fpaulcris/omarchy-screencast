@@ -17,6 +17,7 @@ pub const Listed = struct {
     name: []const u8,
     detail: []const u8,
     url: []const u8,
+    since: i64,
 };
 
 const Rec = struct {
@@ -165,6 +166,7 @@ pub fn listed(arena: std.mem.Allocator, io: std.Io, gpa: std.mem.Allocator, runt
             .name = item.name,
             .detail = detail,
             .url = item.url,
+            .since = sys.fileMtimeMs(io, item.path) orelse 0,
         });
     }
     return out.items;
@@ -513,6 +515,7 @@ fn appendSession(gpa: std.mem.Allocator, body: *std.ArrayList(u8), item: Listed)
     try jsonx.escape(&w, item.detail);
     try w.writeAll(",\"url\":");
     try jsonx.escape(&w, item.url);
+    try w.print(",\"since\":{d}", .{item.since});
     try w.writeAll("}");
     try body.appendSlice(gpa, w.buffered());
 }

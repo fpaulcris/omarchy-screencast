@@ -25,7 +25,21 @@ Panel {
   readonly property bool canCopy: viewUrl !== ""
   readonly property color ink: bar ? bar.barForeground : Color.foreground
 
-  property string mode: "browser"
+  property string mode: "receivers"
+  property string savedMode: "receivers"
+  property bool browserOn: false
+  // Hold the knob on the click until the stream reports, so the switch does not snap back.
+  property bool browserHold: false
+  property bool panelKnown: false
+  property bool choosing: false
+  property bool panelPrefsReady: false
+  property bool sessionsReady: false
+  property bool choiceScanned: false
+  property bool panelReadQueued: false
+  property bool panelWriteQueued: false
+  property var panelWriteArgs: []
+  readonly property bool browserSwitchOn: browserHold ? browserOn : (browserOn && (viewState === "live" || viewState === "starting"))
+  readonly property bool masterOn: viewState === "live" || viewState === "starting" || deviceCasting()
   property string workspaceChoice: ""
   property string sizeChoice: "auto"
   property var desktopOptions: []
@@ -133,9 +147,169 @@ Panel {
   }
 
   function chooseReceivers() {
+    choosing = false
     mode = "receivers"
+    savedMode = "receivers"
+    savePanelPrefs()
     scanReceivers()
     pollMirror()
+  }
+
+  function chooseBrowserTab() {
+    choosing = false
+    mode = "browser"
+    savedMode = "browser"
+    savePanelPrefs()
+  }
+
+  function deviceCasting() {
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (item && (item.state === "live" || item.state === "starting"))
+        return true
+    }
+    return false
+  }
+
+  function deviceFailed() {
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (item && item.state === "failed" && String(item.detail || "") !== "" && failureFresh(item))
+        return true
+    }
+    return false
+  }
+
+  // A failed cast keeps its reason for 30 seconds from when it happened, then the row goes quiet.
+  function failureFresh(item) {
+    if (!item || item.state !== "failed")
+      return true
+    var since = Number(item.since || 0)
+    if (!(since > 0))
+      return true
+    return Date.now() - since < 30000
+  }
+
+  function expireFailures() {
+    var next = []
+    var changed = false
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (item && item.state === "failed" && !failureFresh(item)) {
+        changed = true
+        continue
+      }
+      next.push(item)
+    }
+    if (changed)
+      mirrorSessions = next
+  }
+
+  function otherCasting(id) {
+    for (var i = 0; i < mirrorSessions.length; i++) {
+      var item = mirrorSessions[i]
+      if (!item || item.id === id)
+        continue
+      if (item.state === "live" || item.state === "starting")
+        return true
+    }
+    return false
+  }
+
+  function loadPanelPrefs() {
+    if (panelReadProc.running) {
+      panelReadQueued = true
+      return
+    }
+    panelReadProc.running = true
+  }
+
+  function savePanelPrefs() {
+    panelWriteArgs = ["screencast", "panel", "--mode", savedMode === "browser" ? "browser" : "receivers", "--browser", browserOn ? "on" : "off"]
+    if (panelWriteProc.running) {
+      panelWriteQueued = true
+      return
+    }
+    panelWriteProc.command = panelWriteArgs
+    panelWriteProc.running = true
+  }
+
+  function finishChoice() {
+    if (!choosing || !panelPrefsReady || !sessionsReady)
+      return
+    var casting = deviceCasting()
+    var failed = deviceFailed()
+    var browserLive = browserOn && (viewState === "live" || viewState === "starting")
+    if (!panelKnown && !casting && !failed && viewState === "stopped") {
+      mode = "receivers"
+      if (!choiceScanned) {
+        choiceScanned = true
+        scanReceivers()
+      }
+      return
+    }
+    choosing = false
+    var next = savedMode === "browser" ? "browser" : "receivers"
+    if (!panelKnown) {
+      if (casting || failed) {
+        next = "receivers"
+        browserOn = false
+      } else if (viewState === "live" || viewState === "starting") {
+        next = "browser"
+        browserOn = true
+        browserHold = false
+      } else {
+        next = "receivers"
+      }
+      savedMode = next
+      panelKnown = true
+      savePanelPrefs()
+    } else if (casting && !(savedMode === "browser" && browserLive)) {
+      next = "receivers"
+    } else if (browserLive) {
+      next = "browser"
+    } else if (failed) {
+      next = "receivers"
+    }
+    mode = next
+    if (next === "receivers")
+      scanReceivers()
+  }
+
+  function toggleMaster() {
+    choosing = false
+    if (masterOn) {
+      browserOn = false
+      browserHold = false
+      mirrorSessions = []
+      mirrorQueue = []
+      savePanelPrefs()
+      if (hostWidget && hostWidget.doStop)
+        hostWidget.doStop()
+      return
+    }
+    if (viewState === "missing")
+      return
+    if (hostWidget && hostWidget.doStart)
+      hostWidget.doStart()
+  }
+
+  function toggleBrowser() {
+    choosing = false
+    if (browserSwitchOn) {
+      browserOn = false
+      browserHold = false
+      savePanelPrefs()
+      return
+    }
+    if (viewState === "missing")
+      return
+    browserOn = true
+    browserHold = viewState !== "live"
+    savedMode = "browser"
+    savePanelPrefs()
+    if (viewState !== "live" && viewState !== "starting" && hostWidget && hostWidget.doStart)
+      hostWidget.doStart()
   }
 
   function pollMirror() {
@@ -213,11 +387,19 @@ Panel {
   function toggleDevice(device) {
     if (!device || device.canMirror !== true || !device.id)
       return
+    choosing = false
     if (sessionOn(device.id)) {
+      var others = otherCasting(device.id)
       setSession(device.id, "stopped", "")
-      runMirror(["mirror", "stop", device.id])
+      if (!others && !browserOn && hostWidget && hostWidget.doStop)
+        hostWidget.doStop()
+      else
+        runMirror(["mirror", "stop", device.id])
     } else {
       setSession(device.id, "starting", "Connecting.")
+      savedMode = "receivers"
+      mode = "receivers"
+      savePanelPrefs()
       runMirror(["mirror", device.id])
     }
   }
@@ -267,9 +449,19 @@ Panel {
   onOpenedChanged: {
     if (!root.opened)
       return
+    choosing = true
+    panelPrefsReady = false
+    sessionsReady = false
+    choiceScanned = false
     refreshChoices()
-    if (root.mode === "receivers")
-      scanReceivers()
+    loadPanelPrefs()
+    pollMirror()
+  }
+  onViewStateChanged: {
+    if (browserHold && (viewState === "live" || viewState === "failed" || viewState === "stopped" || viewState === "missing"))
+      browserHold = false
+    if (choosing && panelPrefsReady && sessionsReady)
+      finishChoice()
   }
   Component.onCompleted: {
     applyHostPreview()
@@ -364,11 +556,10 @@ Panel {
             }
 
             ToggleSwitch {
-              checked: root.canStop
-              busy: root.viewState === "starting"
+              checked: root.masterOn
               foreground: root.ink
               enabled: root.viewState !== "missing"
-              onToggled: if (root.hostWidget && root.hostWidget.toggleStream) root.hostWidget.toggleStream()
+              onToggled: root.toggleMaster()
             }
           }
         }
@@ -405,7 +596,7 @@ Panel {
             }
             Text {
               width: parent.width
-              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends this screen, and several can be on at once. The switch at the top stops the stream and every screen. A Fire TV switch sends this desktop to that TV's player. If the player refuses, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
+              text: "Chromecast, AirPlay, and a Miracast receiver on this Wi-Fi each have a switch. The switch sends this screen, and several can be on at once. The switch at the top turns every cast on or off. Browser picture is only the browser, and it can stay on together with a TV. A Fire TV switch sends this desktop to that TV's player. If the player refuses, Screen Cast opens the watch page in the Fire TV browser. If that fails, the row says why. screencast dial lists those apps and can launch one, for example YouTube. Android TV Remote sends keys after pairing. A Miracast TV that only uses Wi-Fi Direct stays off this list."
               wrapMode: Text.WordWrap
               color: root.ink
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -507,7 +698,7 @@ Panel {
             foreground: root.ink
             text: "Browser"
             selected: root.mode === "browser"
-            onClicked: root.mode = "browser"
+            onClicked: root.chooseBrowserTab()
           }
         }
 
@@ -689,6 +880,42 @@ Panel {
           }
         }
 
+        Row {
+          visible: !root.showingInfo && root.mode === "receivers"
+          spacing: Style.space(8)
+
+          Button {
+            bordered: true
+            focusable: true
+            foreground: root.ink
+            text: "Info"
+            onClicked: root.showingInfo = true
+          }
+        }
+
+        RowLayout {
+          width: parent.width
+          visible: !root.showingInfo && root.mode === "browser"
+          spacing: Style.space(8)
+
+          Text {
+            Layout.fillWidth: true
+            text: "Browser picture"
+            color: root.ink
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.body
+            Layout.alignment: Qt.AlignVCenter
+          }
+
+          ToggleSwitch {
+            checked: root.browserSwitchOn
+            foreground: root.ink
+            enabled: root.viewState !== "missing"
+            Layout.alignment: Qt.AlignVCenter
+            onToggled: root.toggleBrowser()
+          }
+        }
+
         Column {
           width: parent.width
           visible: !root.showingInfo && root.mode === "browser"
@@ -799,6 +1026,13 @@ Panel {
               bordered: true
               focusable: true
               foreground: root.ink
+              text: "Info"
+              onClicked: root.showingInfo = true
+            }
+            Button {
+              bordered: true
+              focusable: true
+              foreground: root.ink
               text: "Copy address"
               enabled: root.canCopy
               onClicked: if (root.hostWidget) root.hostWidget.doCopy()
@@ -869,16 +1103,7 @@ Panel {
                 }
               }
             }
-
-            Button {
-              id: infoButton
-              bordered: true
-              focusable: true
-              foreground: root.ink
-              text: "Info"
-              onClicked: root.showingInfo = true
           }
-        }
 
       }
     }
@@ -996,10 +1221,66 @@ Panel {
 
   Timer {
     interval: 2000
-    running: root.opened && root.mode === "receivers"
+    running: root.opened
     repeat: true
     triggeredOnStart: true
     onTriggered: root.pollMirror()
+  }
+
+  Timer {
+    interval: 1000
+    running: root.opened
+    repeat: true
+    onTriggered: root.expireFailures()
+  }
+
+  Process {
+    id: panelReadProc
+    command: ["screencast", "panel", "--json"]
+    stdout: StdioCollector {
+      id: panelReadOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      if (root.panelReadQueued) {
+        root.panelReadQueued = false
+        panelReadProc.running = true
+        return
+      }
+      if (!root.choosing) {
+        root.panelPrefsReady = true
+        return
+      }
+      var data = null
+      try {
+        data = JSON.parse(String(panelReadOut.text || ""))
+      } catch (e) {
+        data = null
+      }
+      if (data) {
+        root.panelKnown = data.known === true
+        root.savedMode = data.mode === "browser" ? "browser" : "receivers"
+        root.browserOn = data.browser === true
+      } else {
+        root.panelKnown = false
+        root.savedMode = "receivers"
+        root.browserOn = false
+      }
+      root.panelPrefsReady = true
+      root.finishChoice()
+    }
+  }
+
+  Process {
+    id: panelWriteProc
+    command: ["screencast", "panel", "--json"]
+    onExited: function(exitCode) {
+      if (!root.panelWriteQueued)
+        return
+      root.panelWriteQueued = false
+      panelWriteProc.command = root.panelWriteArgs
+      panelWriteProc.running = true
+    }
   }
 
   Process {
@@ -1022,7 +1303,7 @@ Panel {
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      var busy = root.mirrorCmdProc.running || root.mirrorQueue.length > 0
+      var busy = mirrorCmdProc.running || root.mirrorQueue.length > 0
       if (!busy) {
         var data = null
         try {
@@ -1039,19 +1320,25 @@ Panel {
           var state = String(item.state || "stopped")
           if (state === "stopped")
             continue
-          next.push({
+          var entry = {
             id: String(item.id),
             name: String(item.name || ""),
             state: state,
             detail: String(item.detail || ""),
-            url: String(item.url || "")
-          })
+            url: String(item.url || ""),
+            since: Number(item.since || 0)
+          }
+          if (state === "failed" && !root.failureFresh(entry))
+            continue
+          next.push(entry)
         }
         root.mirrorSessions = next
+        root.sessionsReady = true
+        root.finishChoice()
       }
       if (root.mirrorPollQueued) {
         root.mirrorPollQueued = false
-        if (!root.mirrorCmdProc.running)
+        if (!mirrorCmdProc.running)
           root.pollMirror()
       }
     }

@@ -290,7 +290,12 @@ pub fn runDesktop(io: std.Io, gpa: std.mem.Allocator, address: []const u8, port:
         if (fling.run(io, gpa, address, port, uuid, stream, playlist)) {
             return;
         } else |err| {
-            if (err != error.NoPlayer) return err;
+            // The stick's own player often shows a spinner and then refuses
+            // the video. Stop that player and open the watch page instead.
+            if (err == error.Reported) {
+                report.clear();
+                report.publish("starting", "Opening the Fire TV browser.", @intCast(linux.getpid()));
+            } else if (err != error.NoPlayer) return err;
         }
     }
     const base = findBase(io, gpa, address) orelse return report.fail(io, "This Fire TV did not answer DIAL.");
@@ -347,7 +352,8 @@ pub fn runDesktop(io: std.Io, gpa: std.mem.Allocator, address: []const u8, port:
             }
         }
         // cloud9 rests at "stopped" until it actually opens. Deleting that state kills the launch.
-        if (!opened and sys.monoMs(io) - started > 8000) {
+        // A cold Silk start on a stick is often still "stopped" well after 8 seconds.
+        if (!opened and sys.monoMs(io) - started > 20000) {
             return report.fail(io, "The Fire TV accepted the launch, but the app stayed stopped.");
         }
         sys.sleepMs(io, 200);
