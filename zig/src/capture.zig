@@ -28,8 +28,9 @@ pub const Pipeline = struct {
     display: []const u8,
     gsr: ?std.process.Child = null,
     audio: ?std.process.Child = null,
-    // Nest Hub's player rejects the 1920x1080 capture. This second recorder
-    // is the 1280x720 picture Cast loads.
+    // Chromecast rejects a 1920x1080 picture and underruns above 4 Mbps.
+    // This recorder is the picture Cast loads. The browser stream stays
+    // at the screen size and its own bitrate.
     cast: ?*hls.Writer = null,
     cast_gsr: ?std.process.Child = null,
     cast_thread: ?std.Thread = null,
@@ -234,8 +235,11 @@ fn spawnAudio(
 }
 
 fn startCastCapture(self: *Pipeline, env: *std.process.Environ.Map, log_file: std.Io.File, width: u32, height: u32) void {
-    const size = fitCast(width, height);
-    if (size.w == width and size.h == height) return;
+    // -s has to match the monitor's aspect or one side leaves the 16-pixel grid.
+    const captured = monitorSize(self.io, self.gpa, self.output) orelse CastSize{ .w = width, .h = height };
+    const size = fitCast(captured.w, captured.h);
+    // The browser recorder is already this picture at 4 Mbps.
+    if (size.w == width and size.h == height and bitrate(width, height) == cast_bitrate) return;
     const cast_writer = hls.Writer.init(self.io, self.gpa, self.hls.dir) catch return;
     cast_writer.live = false;
     self.cast = cast_writer;
@@ -246,7 +250,7 @@ fn startCastCapture(self: *Pipeline, env: *std.process.Environ.Map, log_file: st
         return;
     };
     var rate_buf: [16]u8 = undefined;
-    const rate = std.fmt.bufPrint(&rate_buf, "{d}", .{bitrate(size.w, size.h)}) catch {
+    const rate = std.fmt.bufPrint(&rate_buf, "{d}", .{cast_bitrate}) catch {
         dropCast(self);
         return;
     };
@@ -273,7 +277,7 @@ fn startCastCapture(self: *Pipeline, env: *std.process.Environ.Map, log_file: st
         "-encoder",
         "gpu",
         "-tune",
-        "performance",
+        "quality",
         "-cursor",
         "yes",
         "-ffmpeg-video-opts",
@@ -517,20 +521,79 @@ fn streamFps(width: u32, height: u32) u32 {
 
 const CastSize = struct { w: u32, h: u32 };
 
+// Chromecast holds the live picture at about 4 Mbps. The browser recorder
+// keeps bitrate() below.
+const cast_bitrate: u32 = 4000;
+
+// gpu-screen-recorder -s is a limit. The file shrinks to the captured aspect,
+// so the requested size has to be that aspect or one side lands off the 16-pixel
+// grid Chromecast can decode. Landscape stops at the H.264 level 4.2 frame
+// every Chromecast accepts (2048 wide, no taller than 1080). A 2560x1080
+// screen then becomes 2048x864 instead of a blurry 1024x432. Portrait stays
+// inside 720x1280, which already plays. Nothing is scaled up.
 fn fitCast(width: u32, height: u32) CastSize {
-    const max_w: u32 = 1280;
-    const max_h: u32 = 720;
-    if (width <= max_w and height <= max_h) return .{ .w = width, .h = height };
-    if (max_w * height <= max_h * width) {
-        var fitted = max_w * height / width;
-        fitted &= ~@as(u32, 1);
-        if (fitted < 2) fitted = 2;
-        return .{ .w = max_w, .h = fitted };
+    if (width < 2 or height < 2) return .{ .w = 1280, .h = 720 };
+    const portrait = height > width;
+    const max_w: u32 = if (portrait) 720 else 2048;
+    const max_h: u32 = if (portrait) 1280 else 1080;
+    if (width % 16 == 0 and height % 16 == 0 and width <= max_w and height <= max_h) {
+        return .{ .w = width, .h = height };
     }
-    var fitted = max_h * width / height;
-    fitted &= ~@as(u32, 1);
-    if (fitted < 2) fitted = 2;
-    return .{ .w = fitted, .h = max_h };
+    const div = gcdU(width, height);
+    const rw = width / div;
+    const rh = height / div;
+    const step = lcmU(alignStep(rw), alignStep(rh));
+    var k: u32 = step;
+    var best: u32 = 0;
+    while (k > 0 and rw > 0 and rh > 0) {
+        if (k > max_w / rw or k > max_h / rh or k > width / rw or k > height / rh) break;
+        const ow = k * rw;
+        const oh = k * rh;
+        if (ow >= 16 and oh >= 16) best = k;
+        const next = std.math.add(u32, k, step) catch break;
+        k = next;
+    }
+    if (best == 0) return if (portrait) .{ .w = 720, .h = 1280 } else .{ .w = 1280, .h = 720 };
+    return .{ .w = best * rw, .h = best * rh };
+}
+
+fn monitorSize(io: std.Io, gpa: std.mem.Allocator, output: []const u8) ?CastSize {
+    if (!sys.safeName(output)) return null;
+    const result = sys.run(gpa, io, &.{ "/usr/bin/gpu-screen-recorder", "--list-monitors" }, 3000, 64 * 1024) catch return null;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const bar = std.mem.indexOfScalar(u8, trimmed, '|') orelse continue;
+        if (!std.mem.eql(u8, trimmed[0..bar], output)) continue;
+        const dim = trimmed[bar + 1 ..];
+        const mark = std.mem.indexOfScalar(u8, dim, 'x') orelse continue;
+        const w = std.fmt.parseInt(u32, dim[0..mark], 10) catch continue;
+        const h = std.fmt.parseInt(u32, dim[mark + 1 ..], 10) catch continue;
+        if (w < 2 or h < 2) continue;
+        return .{ .w = w, .h = h };
+    }
+    return null;
+}
+
+fn gcdU(a: u32, b: u32) u32 {
+    var x = a;
+    var y = b;
+    while (y != 0) {
+        const t = x % y;
+        x = y;
+        y = t;
+    }
+    return if (x == 0) 1 else x;
+}
+
+fn lcmU(a: u32, b: u32) u32 {
+    return a / gcdU(a, b) * b;
+}
+
+fn alignStep(reduced: u32) u32 {
+    return 16 / gcdU(reduced, 16);
 }
 
 fn bitrate(width: u32, height: u32) u32 {
@@ -541,19 +604,37 @@ fn bitrate(width: u32, height: u32) u32 {
     return 20000;
 }
 
-test "cast picture fits inside 1280x720" {
+test "cast picture stays on a 16 pixel grid" {
     const hd = fitCast(1920, 1080);
-    try std.testing.expectEqual(@as(u32, 1280), hd.w);
-    try std.testing.expectEqual(@as(u32, 720), hd.h);
+    try std.testing.expectEqual(@as(u32, 1792), hd.w);
+    try std.testing.expectEqual(@as(u32, 1008), hd.h);
     const same = fitCast(1280, 720);
     try std.testing.expectEqual(@as(u32, 1280), same.w);
     try std.testing.expectEqual(@as(u32, 720), same.h);
     const small = fitCast(800, 600);
-    try std.testing.expectEqual(@as(u32, 800), small.w);
-    try std.testing.expectEqual(@as(u32, 600), small.h);
+    try std.testing.expectEqual(@as(u32, 768), small.w);
+    try std.testing.expectEqual(@as(u32, 576), small.h);
     const wide = fitCast(1920, 1200);
-    try std.testing.expectEqual(@as(u32, 1152), wide.w);
-    try std.testing.expectEqual(@as(u32, 720), wide.h);
+    try std.testing.expectEqual(@as(u32, 1664), wide.w);
+    try std.testing.expectEqual(@as(u32, 1040), wide.h);
+    const turned = fitCast(1080, 1920);
+    try std.testing.expectEqual(@as(u32, 720), turned.w);
+    try std.testing.expectEqual(@as(u32, 1280), turned.h);
+    const ultra = fitCast(2560, 1080);
+    try std.testing.expectEqual(@as(u32, 2048), ultra.w);
+    try std.testing.expectEqual(@as(u32, 864), ultra.h);
+    for ([_]CastSize{ hd, same, small, wide, turned, ultra }) |item| {
+        try std.testing.expectEqual(@as(u32, 0), item.w % 16);
+        try std.testing.expectEqual(@as(u32, 0), item.h % 16);
+    }
+}
+
+test "browser bitrate follows the picture size" {
+    try std.testing.expectEqual(@as(u32, 4000), bitrate(1280, 720));
+    try std.testing.expectEqual(@as(u32, 8000), bitrate(1920, 1080));
+    try std.testing.expectEqual(@as(u32, 8000), bitrate(1792, 1008));
+    try std.testing.expectEqual(@as(u32, 12000), bitrate(2560, 1440));
+    try std.testing.expectEqual(@as(u32, 20000), bitrate(3840, 2160));
 }
 
 fn defaultSink(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
